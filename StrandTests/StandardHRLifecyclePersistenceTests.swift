@@ -16,7 +16,7 @@ final class StandardHRLifecyclePersistenceTests: XCTestCase {
             offeredHRRows = streams.hr.count
             offeredRRRows = streams.rr.count
             // Deliberately differ from the offered counts: this is the store's conflict/dedup result.
-            return (0, 1, 0, 0, 0, 0, 0, 0)
+            return (0, 0, 0, 0, 0, 0, 0, 0)
         }
 
         func enqueueRawBatch(_ meta: RawBatchMeta, frames: [[UInt8]]) async throws {}
@@ -41,7 +41,7 @@ final class StandardHRLifecyclePersistenceTests: XCTestCase {
         await manager.flushStandardHRForLifecycle(reason: .background)
 
         XCTAssertEqual(store.offeredHRRows, 1)
-        XCTAssertEqual(store.offeredRRRows, 2)
+        XCTAssertEqual(store.offeredRRRows, 0)
         XCTAssertTrue(lines.contains(
             "standard-hr transport host-received hostUnixSec=1750000000"
                 + " acceptedHRRows=1 acceptedRRRows=2 rejectedHRRows=0 rejectedRRRows=1"
@@ -49,7 +49,8 @@ final class StandardHRLifecyclePersistenceTests: XCTestCase {
         ))
         XCTAssertTrue(lines.contains(
             "standard-hr transport flush-succeeded reason=background"
-                + " offeredHRRows=1 offeredRRRows=2 insertedHRRows=0 insertedRRRows=1"
+                + " offeredHRRows=1 offeredRRRows=2 insertedHRRows=0 insertedRRRows=0"
         ))
+        XCTAssertTrue(lines.contains("rr source=standard liveReceived=2 persisted=0 mode=ui-only"))
     }
 }

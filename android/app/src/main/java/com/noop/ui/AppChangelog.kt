@@ -26,7 +26,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "11.7.0"
+    const val CURRENT_VERSION = "11.7.1"
 
     data class Release(
         val version: String,
@@ -37,6 +37,15 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "11.7.1",
+            title = uiString(R.string.l10n_app_changelog_historical_r_r_as_the_sole_26c6f81d),
+            date = "September 2026",
+            items = listOf(
+                "**One durable R-R source.** R-R intervals offloaded from WHOOP strap memory are now the only WHOOP R-R intervals saved for long-term analytics. Standard 2A37 and R10/R11 R-R remain available to live screens and diagnostics without entering the persistent R-R dataset. Existing data, database compatibility, HR behaviour, filtering, HRV, sleep, respiration, strain and recovery maths are unchanged.",
+                "**Coverage you can verify.** Offload diagnostics identify historical R-R as the authority and report its interval count, occupied seconds, summed duration, represented span, coverage ratios, delivery histogram and gaps. Live-source diagnostics explicitly report zero persisted R-R rows.",
+            ),
+        ),
         Release(
             version = "11.7.0",
             title = uiString(R.string.l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36),

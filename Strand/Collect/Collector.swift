@@ -34,11 +34,19 @@ struct CollectorPolicy {
 }
 
 /// Buffers complete (reassembled) frames and periodically persists them:
-/// parse → extractStreams(clockRef) → store.insert (DECODED FIRST, durable) →
+/// parse → extractStreams(clockRef) → remove live R-R → store.insert (DECODED FIRST, durable) →
 /// store.enqueueRawBatch (raw, transient outbox) → clear buffer.
 /// Because decoded is committed before raw is queued, pruning raw never loses a metric.
 @MainActor
 final class Collector {
+    /// The durable projection of a WHOOP realtime batch. Kept pure so the authority boundary is
+    /// directly testable without CoreBluetooth or SQLite; all non-R-R streams remain byte-for-byte.
+    nonisolated static func liveDurableStreams(_ streams: Streams) -> Streams {
+        var durable = streams
+        durable.rr.removeAll(keepingCapacity: false)
+        return durable
+    }
+
     private let store: StoreWriting
     /// Concrete store for prune + stats (the StoreWriting seam covers the hot insert/enqueue path;
     /// prune/stats are infrequent so a direct reference is clearer than widening the protocol).
@@ -239,9 +247,13 @@ final class Collector {
                 log?(RrEmissionStats.logLine(path: "live-realtime", offered: streams.rr.count,
                                              inserted: nil, census))
             }
+            log?("rr source=r10r11 liveReceived=\(streams.rr.count) persisted=0 mode=ui-only")
         }
+        // NOOP 11.7.1: custom R10/R11 R-R remains decoded for LiveState/diagnostics, but historical
+        // strap-memory R-R is the sole authority allowed into the canonical rrInterval table.
+        let durableStreams = Self.liveDurableStreams(streams)
         do {
-            let inserted = try await store.insert(streams, deviceId: deviceId)   // DECODED FIRST (durable)
+            let inserted = try await store.insert(durableStreams, deviceId: deviceId) // DECODED FIRST (durable)
             realtimeInsertFailures = 0
             onBanked?(inserted)
         } catch {
@@ -306,7 +318,7 @@ final class Collector {
         }
     }
 
-    /// Persist the buffered standard HR/RR/contact. Re-buffers on failure so nothing is lost.
+    /// Persist buffered standard HR/contact. R-R is deliberately consumed as live-only and discarded.
     func flushStandardHR(reason: LivePersistTrace.StandardHRFlushReason = .explicit) async {
         guard !stdHR.isEmpty || !stdRR.isEmpty || !stdContact.isEmpty else { return }
         let hr = stdHR, rr = stdRR, contact = stdContact
@@ -329,9 +341,11 @@ final class Collector {
                 log?(RrEmissionStats.logLine(path: "live-standard", offered: rr.count,
                                              inserted: nil, census))
             }
+            log?("rr source=standard liveReceived=\(rr.count) persisted=0 mode=ui-only")
         }
         do {
-            let inserted = try await store.insert(Streams(hr: hr, rr: rr, events: contact), deviceId: deviceId)
+            // NOOP 11.7.1: preserve the existing HR/contact write, but never offer 0x2A37 R-R to SQLite.
+            let inserted = try await store.insert(Streams(hr: hr, events: contact), deviceId: deviceId)
             stdInsertFailures = 0
             onBanked?(inserted)
             log?(LivePersistTrace.standardHRFlushSucceededLine(
@@ -339,7 +353,7 @@ final class Collector {
                 insertedHRRows: inserted.hr, insertedRRRows: inserted.rr))
         } catch {
             stdHR.insert(contentsOf: hr, at: 0)
-            stdRR.insert(contentsOf: rr, at: 0)
+            // R-R is not re-buffered: it has already served its realtime consumers and has no durable sink.
             stdContact.insert(contentsOf: contact, at: 0)
             stdInsertFailures += 1
             log?(LivePersistTrace.standardHRRebufferedForRetryLine(

@@ -47,6 +47,13 @@ object StreamPersistence {
     )
 
     /**
+     * WHOOP live transport persistence policy (NOOP 11.7.1). Live R-R has already reached StateFlow/UI
+     * before this mapping runs; only its durable representation is removed. Historical offload does not
+     * use this helper and continues to persist every decoded R-R interval through its existing model.
+     */
+    fun toLiveWhoopBatch(streams: Streams): StreamBatch = toBatch(streams).copy(rr = emptyList())
+
+    /**
      * Pack a decoded v26 PPG waveform's samples as little-endian i16 (2 bytes/sample) — a single compact
      * BLOB per (deviceId, ts) row instead of 24 scalar rows (issue #156 follow-up, MIGRATION_19_20). Port
      * of Swift `WhoopStore.packPpgSamples`, BYTE-IDENTICAL so a `.noopbak` round-trips across platforms.

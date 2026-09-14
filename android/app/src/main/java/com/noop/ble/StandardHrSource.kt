@@ -336,7 +336,10 @@ class StandardHrSource(
         }
         if (hrRows.isEmpty() && rrRows.isEmpty() && contactEvents.isEmpty()) return
         log(standardHrFlushAttemptLine(reason.raw, hrRows.size, rrRows.size))
-        persist(StreamBatch(hr = hrRows, rr = rrRows, events = contactEvents), deviceId) { result ->
+        if (rrRows.isNotEmpty()) {
+            log("rr source=standard liveReceived=${rrRows.size} persisted=0 mode=ui-only")
+        }
+        persist(StreamBatch(hr = hrRows, events = contactEvents), deviceId) { result ->
             result.fold(
                 onSuccess = { counts ->
                     insertFailures.set(0)

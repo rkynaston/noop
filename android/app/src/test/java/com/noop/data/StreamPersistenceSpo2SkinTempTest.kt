@@ -4,6 +4,7 @@ import com.noop.protocol.SkinTempSample
 import com.noop.protocol.Spo2Sample
 import com.noop.protocol.Streams
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -13,6 +14,21 @@ import org.junit.Test
  * spo2/skinTemp) still produces empty lists, so the WHOOP path is unaffected.
  */
 class StreamPersistenceSpo2SkinTempTest {
+
+    @Test
+    fun liveWhoopProjectionDropsOnlyRr() {
+        val streams = Streams(
+            hr = listOf(com.noop.protocol.HrSample(100, 60)),
+            rr = listOf(com.noop.protocol.RrInterval(100, 980), com.noop.protocol.RrInterval(100, 1_015)),
+            events = listOf(com.noop.protocol.WhoopEvent(100, "live", emptyMap())),
+        )
+
+        val batch = StreamPersistence.toLiveWhoopBatch(streams)
+
+        assertEquals(1, batch.hr.size)
+        assertEquals(1, batch.events.size)
+        assertTrue(batch.rr.isEmpty())
+    }
 
     @Test
     fun spo2AndSkinTempWidenOntoStreamBatch() {

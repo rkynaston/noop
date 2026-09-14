@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "11.7.0"
+    static let currentVersion = "11.7.1"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,15 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "11.7.1",
+            title: "Historical R-R as the sole persisted authority",
+            date: "September 2026",
+            items: [
+                "**One durable R-R source.** R-R intervals offloaded from WHOOP strap memory are now the only WHOOP R-R intervals saved for long-term analytics. Standard 2A37 and R10/R11 R-R remain available to live screens and diagnostics without entering the persistent R-R dataset. Existing data, database compatibility, HR behaviour, filtering, HRV, sleep, respiration, strain and recovery maths are unchanged.",
+                "**Coverage you can verify.** Offload diagnostics identify historical R-R as the authority and report its interval count, occupied seconds, summed duration, represented span, coverage ratios, delivery histogram and gaps. Live-source diagnostics explicitly report zero persisted R-R rows.",
+            ]
+        ),
         Release(
             version: "11.7.0",
             title: "A stress screen that keeps up, WHOOP 5 readings in the units the strap sends, and a ring that stops repeating itself",

@@ -9862,17 +9862,20 @@ class WhoopBleClient(
             .mapNotNull { (it.parsed["timestamp"] as? Number)?.toInt() }
             .maxOrNull() ?: now
         val streams: Streams = extractStreams(parsed, deviceClockRef = newestRealtimeTs, wallClockRef = now)
-        val batch = StreamPersistence.toBatch(streams)
+        val batch = StreamPersistence.toLiveWhoopBatch(streams)
         // #1118: the SECOND live transport. The standard 0x2A37 path above stamps a beat at the second
         // it arrived; this one stamps it from the strap's own record clock. The same beat reaching both
         // lands on two different seconds, which no same-second de-dup can collapse — the signature every
         // affected night prints as `crossSecondOverCount`.
-        if (batch.rr.isNotEmpty()) {
+        if (streams.rr.isNotEmpty()) {
             if (com.noop.analytics.RrEmissionStats.shouldEmitLiveCensus(lastRealtimeRrCensusSec, now)) {
                 lastRealtimeRrCensusSec = now
-                val census = com.noop.analytics.RrEmissionStats.compute(batch.rr.map { it.ts.toInt() to it.rrMs })
-                log(com.noop.analytics.RrEmissionStats.logLine("live-realtime", batch.rr.size, null, census))
+                val census = com.noop.analytics.RrEmissionStats.compute(streams.rr.map { it.ts to it.rrMs })
+                log(com.noop.analytics.RrEmissionStats.logLine("live-realtime", streams.rr.size, null, census))
             }
+        }
+        if (streams.rr.isNotEmpty()) {
+            log("rr source=r10r11 liveReceived=${streams.rr.size} persisted=0 mode=ui-only")
         }
         if (!batch.isEmpty) {
             try {
@@ -9961,12 +9964,16 @@ class WhoopBleClient(
                 log(com.noop.analytics.RrEmissionStats.logLine("live-standard", rr.size, null, census))
             }
         }
+        if (rr.isNotEmpty()) {
+            log("rr source=standard liveReceived=${rr.size} persisted=0 mode=ui-only")
+        }
         try {
-            addBankedLive(repository.insert(StreamBatch(hr = hr, rr = rr, events = contact), deviceId))
+            // NOOP 11.7.1: keep standard HR/contact persistence unchanged; R-R is live-only.
+            addBankedLive(repository.insert(StreamBatch(hr = hr, events = contact), deviceId))
             liveInsertFailuresStd.set(0)
         } catch (t: Throwable) {
             synchronized(collectorLock) {
-                stdHr.addAll(0, hr); stdRr.addAll(0, rr); stdContact.addAll(0, contact)
+                stdHr.addAll(0, hr); stdContact.addAll(0, contact)
             }
             // Swallowing this made the instrumentation above read like success: a store failing every
             // insert produced a log full of `rr emit ... offered=N` and no sign that none of it landed.

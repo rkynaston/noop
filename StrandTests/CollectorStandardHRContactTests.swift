@@ -77,14 +77,12 @@ final class CollectorStandardHRContactTests: XCTestCase {
         )
         await collector.flushStandardHR()
 
-        XCTAssertEqual(store.inserted, [
-            StandardHRMapping.samples(
-                fromHR: 72,
-                rr: [1_000],
-                contact: .supportedNotDetected,
-                at: 1_750_000_000
-            )
-        ])
+        XCTAssertEqual(store.inserted.count, 1)
+        XCTAssertEqual(store.inserted.first?.hr, [HRSample(ts: 1_750_000_000, bpm: 72)])
+        XCTAssertTrue(store.inserted.first?.rr.isEmpty == true)
+        XCTAssertEqual(store.inserted.first?.events, StandardHRMapping.samples(
+            fromHR: 72, rr: [], contact: .supportedNotDetected, at: 1_750_000_000
+        ).events)
     }
 
     func testWhoopStandardHRCollectorRebuffersContactAfterInsertFailure() async {
@@ -108,7 +106,7 @@ final class CollectorStandardHRContactTests: XCTestCase {
         ])
     }
 
-    func testRrFamilyIsCapturedAtIngressAndSurvivesRetry() async {
+    func testStandardRrNeverPersistsAndIsNotRebufferedAfterRetry() async {
         let store = CaptureStore()
         let collector = Collector(store: store, deviceId: "strap")
         collector.ingestStandardHR(hr: 60, rr: [1000], family: .whoop5, at: 100)
@@ -118,7 +116,21 @@ final class CollectorStandardHRContactTests: XCTestCase {
         await collector.flushStandardHR()
         XCTAssertTrue(store.inserted.isEmpty)
         await collector.flushStandardHR()
-        XCTAssertEqual(store.inserted.flatMap(\.rr).map(\.srcChannel), [.whoop5Standard, nil, nil])
-        XCTAssertEqual(store.inserted.flatMap(\.rr).map(\.rrMs), [1000, 1001, 1002])
+        XCTAssertTrue(store.inserted.flatMap(\.rr).isEmpty)
+        XCTAssertEqual(store.inserted.flatMap(\.hr).count, 3)
+    }
+
+    func testR10R11DurableProjectionDropsOnlyRr() {
+        let live = Streams(
+            hr: [HRSample(ts: 100, bpm: 60)],
+            rr: [RRInterval(ts: 100, rrMs: 980), RRInterval(ts: 100, rrMs: 1_015)],
+            events: [WhoopEvent(ts: 100, kind: "live", payload: [:])]
+        )
+
+        let durable = Collector.liveDurableStreams(live)
+
+        XCTAssertEqual(durable.hr, live.hr)
+        XCTAssertEqual(durable.events, live.events)
+        XCTAssertTrue(durable.rr.isEmpty)
     }
 }

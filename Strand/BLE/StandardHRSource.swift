@@ -239,6 +239,10 @@ public final class StandardHRSource: NSObject, ObservableObject {
 
     private func flush() {
         guard !buffer.isEmpty else { lastFlush = Date(); return }
+        let liveRRCount = buffer.reduce(0) { $0 + $1.rr.count }
+        if liveRRCount > 0 {
+            log("HR-strap: rr source=standard liveReceived=\(liveRRCount) persisted=0 mode=ui-only")
+        }
         for sample in buffer {
             persist(StandardHRMapping.samples(fromHR: sample.hr, rr: sample.rr,
                                                contact: sample.contact, at: sample.ts))

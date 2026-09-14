@@ -120,6 +120,25 @@ final class RrEmissionStatsTests: XCTestCase {
         XCTAssertTrue(live.contains("offered=3 inserted=n/a "), live)
     }
 
+    func testHistoricalAuthorityLineIdentifiesFreshCoverageAndPersistence() {
+        let r = RrEmissionStats.compute([
+            (ts: 100, rrMs: 500), (ts: 100, rrMs: 490), (ts: 101, rrMs: 990)
+        ])
+        let line = RrEmissionStats.historicalAuthorityLine(
+            received: 3, accepted: 3, persisted: 3, rejected: 0, r)
+        XCTAssertTrue(line.hasPrefix(
+            "rr source=historical received=3 accepted=3 persisted=3 rejected=0 mode=authority coverage=ok largestGap=1s "), line)
+        XCTAssertTrue(line.contains("secs=2 sumRr=1s span=2s ratio=0.99"), line)
+        XCTAssertTrue(line.contains("perSec[1/2/3/4+]=1/1/0/0"), line)
+    }
+
+    func testHistoricalAuthorityLineWarnsOnIncompleteCoverage() {
+        let r = RrEmissionStats.compute([(ts: 100, rrMs: 800), (ts: 110, rrMs: 800)])
+        XCTAssertTrue(RrEmissionStats.historicalAuthorityLine(
+            received: 2, accepted: 2, persisted: 2, rejected: 0, r
+        ).contains("coverage=warning largestGap=8+s"))
+    }
+
     /// A GAP must not read as healthy emission. Two doubled seconds an hour apart carry a 2.0 emission
     /// defect, but the wall span between them dilutes `ratio` to almost nothing — so `ratio` alone would
     /// report the *opposite* of the truth on exactly the session this instrumentation is meant to judge.

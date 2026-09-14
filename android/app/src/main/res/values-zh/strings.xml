@@ -2685,4 +2685,5 @@
     <string name="l10n_today_screen_scan_and_connect_40157030">扫描并连接</string>
     <string name="l10n_health_screen_fitness_age_stops_here_vo_max_383d989a">体能年龄到此为止，VO₂max 仍在变化。</string>
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">跟得上的压力页面、以手环实际发送单位读取的 WHOOP 5 数值，以及不再重复上报的指环</string>
+    <string name="l10n_app_changelog_historical_r_r_as_the_sole_26c6f81d">Historical R-R as the sole persisted authority</string>
 </resources>

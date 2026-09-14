@@ -131,6 +131,19 @@ class RrEmissionStatsTest {
         assertTrue(live, live.startsWith("rr emit path=live-standard offered=3 inserted=n/a secs=2 "))
     }
 
+    @Test
+    fun historicalAuthorityLineNamesSourceAndCoverageStatus() {
+        val r = RrEmissionStats.compute(listOf(100 to 500, 100 to 490, 101 to 990))
+        val line = RrEmissionStats.historicalAuthorityLine(3, 3, 3, 0, r)
+        assertTrue(line, line.startsWith(
+            "rr source=historical received=3 accepted=3 persisted=3 rejected=0 mode=authority coverage=ok largestGap=1s ",
+        ))
+        assertTrue(line, line.contains("perSec[1/2/3/4+]=1/1/0/0"))
+        val gap = RrEmissionStats.compute(listOf(100 to 800, 110 to 800))
+        assertTrue(RrEmissionStats.historicalAuthorityLine(2, 2, 2, 0, gap)
+            .contains("coverage=warning largestGap=8+s"))
+    }
+
     /**
      * A GAP must not read as healthy emission. Two doubled seconds an hour apart carry a 2.0 emission
      * defect, but the wall span between them dilutes `ratio` to almost nothing — so `ratio` alone would
