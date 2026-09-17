@@ -46,30 +46,40 @@ object StreamPersistence {
         // gravity/steps/ppgHr remain type-47-only (historical offload), unchanged.
     )
 
-    /** WHOOP realtime durable projection: retain every live stream except R-R. */
-    fun toLiveWhoopBatch(streams: Streams): StreamBatch = toBatch(streams).copy(rr = emptyList())
-
+    /**
+     * Pack a decoded v26 PPG waveform's samples as little-endian i16 (2 bytes/sample) — a single compact
+     * BLOB per (deviceId, ts) row instead of 24 scalar rows (issue #156 follow-up, MIGRATION_19_20). Port
+     * of Swift `WhoopStore.packPpgSamples`, BYTE-IDENTICAL so a `.noopbak` round-trips across platforms.
+     * Any sample count is handled (a truncated frame can decode fewer than 24); each value is truncated to
+     * Int16's range (`toShort()`), matching the i16 wire format the decoder read it from.
+     */
     fun packPpgSamples(samples: List<Int>): ByteArray {
         val buf = ByteArray(samples.size * 2)
         for ((i, s) in samples.withIndex()) {
-            val v = s.toShort().toInt()
-            buf[i * 2] = (v and 0xFF).toByte()
+            val v = s.toShort().toInt()              // truncate to 16 bits, then read low/high bytes
+            buf[i * 2] = (v and 0xFF).toByte()       // little-endian: low byte first
             buf[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
         return buf
     }
 
+    /**
+     * Inverse of [packPpgSamples]. A trailing odd byte (a corrupt/truncated blob) is dropped rather than
+     * thrown — a read path never crashes on a malformed row. Port of Swift `WhoopStore.unpackPpgSamples`.
+     */
     fun unpackPpgSamples(data: ByteArray): List<Int> {
         val out = ArrayList<Int>(data.size / 2)
         var i = 0
         while (i + 1 < data.size) {
             val u = (data[i].toInt() and 0xFF) or ((data[i + 1].toInt() and 0xFF) shl 8)
-            out.add(u.toShort().toInt())
+            out.add(u.toShort().toInt())             // sign-extend the 16-bit value back to Int
             i += 2
         }
         return out
     }
 
+    /** #423: pack the raw-IMU i16 columns to a little-endian BLOB (same wire encoding as [packPpgSamples],
+     *  just a [ShortArray] source — the 6×100 columns [ax…az,gx…gz]). Byte-identical to Swift's pack. */
     fun packImuColumns(cols: ShortArray): ByteArray {
         val buf = ByteArray(cols.size * 2)
         for (i in cols.indices) {
@@ -80,6 +90,7 @@ object StreamPersistence {
         return buf
     }
 
+    /** Inverse of [packImuColumns]; a trailing odd byte is dropped so a malformed row never crashes a read. */
     fun unpackImuColumns(data: ByteArray): ShortArray {
         val n = data.size / 2
         val out = ShortArray(n)
@@ -89,6 +100,16 @@ object StreamPersistence {
         return out
     }
 
+    /**
+     * Deterministic sorted-keys JSON for an event payload. Port of `WhoopStore.encodePayload`.
+     *
+     * `org.json.JSONObject` does NOT guarantee key order, so we build the JSON manually with keys
+     * sorted ascending (the same ordering `JSONEncoder.outputFormatting = [.sortedKeys]` produces),
+     * quoting each value by its Kotlin type. Empty payloads encode to `{}`, matching Swift.
+     *
+     * Public so the historical-offload extractor (`com.noop.protocol.extractHistoricalStreams`) can
+     * encode offloaded EVENT payloads through the SAME canonical encoder the live path uses.
+     */
     fun encodePayload(payload: Map<String, Any?>): String {
         if (payload.isEmpty()) return "{}"
         val sb = StringBuilder("{")
@@ -101,12 +122,15 @@ object StreamPersistence {
         return sb.toString()
     }
 
+    /** Encode one JSON value by Kotlin type (numbers bare, strings/bools/null literal, lists as arrays). */
     private fun encodeValue(v: Any?): String = when (v) {
         null -> "null"
         is Boolean -> v.toString()
         is Int, is Long -> v.toString()
         is Double, is Float -> {
             val d = (v as Number).toDouble()
+            // Integral doubles render without a fractional suffix would diverge from Swift, but the
+            // event residual payloads here are ints/strings/lists; keep doubles JSON-canonical.
             if (d.isFinite()) d.toString() else "null"
         }
         is List<*> -> buildString {
