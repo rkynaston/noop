@@ -7,8 +7,7 @@ final class StandardHRMappingTests: XCTestCase {
         let s = StandardHRMapping.samples(fromHR: 72, rr: [820, 815], at: 1_750_000_000)
         XCTAssertEqual(s.hr.map { $0.bpm }, [72])
         XCTAssertEqual(s.hr.map { $0.ts }, [1_750_000_000])
-        XCTAssertEqual(s.rr.map { $0.rrMs }, [820, 815])
-        XCTAssertEqual(s.rr.map { $0.ts }, [1_750_000_000, 1_750_000_000])
+        XCTAssertTrue(s.rr.isEmpty, "standard R-R is live-only under the 11.7.1 authority policy")
     }
 
     func testStandardHRWithNoRRLeavesRREmpty() throws {
@@ -58,9 +57,10 @@ final class StandardHRMappingTests: XCTestCase {
         ])
     }
 
-    func testOnlyHRandRRStreamsArePopulated() throws {
+    func testOnlyDurableHRStreamIsPopulated() throws {
         // A chest strap reports nothing else — every other stream must stay empty.
         let s = StandardHRMapping.samples(fromHR: 88, rr: [700], at: 42)
+        XCTAssertTrue(s.rr.isEmpty)
         XCTAssertTrue(s.spo2.isEmpty)
         XCTAssertTrue(s.skinTemp.isEmpty)
         XCTAssertTrue(s.resp.isEmpty)

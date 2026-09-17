@@ -420,8 +420,9 @@ final class Backfiller {
                                        intervals: sessionRrOffered, sumRrMs: sessionRrSumMs,
                                        spanSec: span, ratio: ratio, perSecond: sessionRrHist,
                                        gapHist: sessionRrGapHist, fill: sessionRrFill)
-        return RrEmissionStats.logLine(path: "historical", offered: sessionRrOffered,
-                                       inserted: sessionRrInserted, r)
+        return RrEmissionStats.historicalAuthorityLine(
+            received: sessionRrOffered, accepted: sessionRrOffered,
+            persisted: sessionRrInserted, rejected: 0, r)
     }
 
     /// #67 diag: the persisted-nights DATE RANGE plus the offload's effective clock state — the two facts

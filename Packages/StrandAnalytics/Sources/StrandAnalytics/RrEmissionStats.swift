@@ -184,4 +184,16 @@ public enum RrEmissionStats {
             + "modalGap=\(r.modalGapSec)s "
             + "fill[<=1/<=1.5/<=2/>2]=\(r.fill[0])/\(r.fill[1])/\(r.fill[2])/\(r.fill[3])"
     }
+
+    /// NOOP 11.7.1's fresh-data authority line. It deliberately uses the decoded offload batch/session,
+    /// not a database read, so pre-11.7.1 rows cannot inflate this validation signal.
+    public static func historicalAuthorityLine(received: Int, accepted: Int, persisted: Int,
+                                               rejected: Int, _ r: Result) -> String {
+        let status = (0.90...1.10).contains(r.ratio) ? "ok" : "warning"
+        let largestBucket = r.gapHist.lastIndex(where: { $0 > 0 }).map { $0 + 1 } ?? 0
+        let largestGap = largestBucket == 8 ? "8+s" : "\(largestBucket)s"
+        return "rr source=historical received=\(received) accepted=\(accepted) persisted=\(persisted) "
+            + "rejected=\(rejected) mode=authority coverage=\(status) largestGap=\(largestGap) "
+            + logLine(path: "historical", offered: accepted, inserted: persisted, r)
+    }
 }

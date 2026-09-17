@@ -30,8 +30,9 @@ public enum StandardHRMapping {
         previous != current
     }
 
-    /// Build a `Streams` carrying one HR sample and zero-or-more R-R intervals, all stamped at the
-    /// same wall-clock `ts` (unix seconds). Pure → unit-testable.
+    /// Build the DURABLE projection of a standard 0x2A37 reading. R-R is intentionally omitted under
+    /// NOOP 11.7.1's historical-only authority policy; callers still decode and publish `rr` before
+    /// invoking this mapper. The unused parameter keeps the live-to-persistence seam source-compatible.
     public static func samples(fromHR hr: Int, rr: [Int], contact: StandardHRContact? = nil,
                                at ts: Int) -> Streams {
         let events = contact.map { [
@@ -39,7 +40,6 @@ public enum StandardHRMapping {
         ] } ?? []
         return Streams(
             hr: [HRSample(ts: ts, bpm: hr)],
-            rr: rr.map { RRInterval(ts: ts, rrMs: $0) },
             events: events
         )
     }
