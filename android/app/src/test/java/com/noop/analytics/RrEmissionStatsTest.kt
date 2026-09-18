@@ -15,6 +15,30 @@ import org.junit.Test
  */
 class RrEmissionStatsTest {
 
+    // Expected lines are verbatim stdout from the standalone Swift RrEmissionStats oracle.
+    @Test fun historicalAuthorityMatchesSwiftOracle() {
+        val vectors = listOf(emptyList(), listOf(100 to 1000, 101 to 1000),
+            listOf(100 to 800, 100 to 800, 108 to 800))
+        val expected = listOf(
+            "rr source=historical received=0 accepted=0 persisted=0 rejected=0 mode=authority coverage=warning largestGap=0s rr emit path=historical offered=0 inserted=0 secs=0 sumRr=0s span=0s ratio=0.00 ratioRep=0.00 perSec[1/2/3/4+]=0/0/0/0 modalGap=0s fill[<=1/<=1.5/<=2/>2]=0/0/0/0",
+            "rr source=historical received=2 accepted=2 persisted=1 rejected=0 mode=authority coverage=ok largestGap=1s rr emit path=historical offered=2 inserted=1 secs=2 sumRr=2s span=2s ratio=1.00 ratioRep=1.00 perSec[1/2/3/4+]=2/0/0/0 modalGap=1s fill[<=1/<=1.5/<=2/>2]=1/0/0/0",
+            "rr source=historical received=3 accepted=3 persisted=2 rejected=0 mode=authority coverage=warning largestGap=8+s rr emit path=historical offered=3 inserted=2 secs=2 sumRr=2s span=9s ratio=0.27 ratioRep=1.20 perSec[1/2/3/4+]=1/1/0/0 modalGap=8s fill[<=1/<=1.5/<=2/>2]=1/0/0/0",
+        )
+        vectors.forEachIndexed { index, rr ->
+            assertEquals(expected[index], RrEmissionStats.historicalAuthorityLine(
+                rr.size, rr.size, maxOf(0, rr.size - 1), 0, RrEmissionStats.compute(rr)))
+        }
+    }
+
+    @Test fun historicalAuthorityCoverageBoundsAreInclusive() {
+        for ((ms, status) in listOf(899 to "warning", 900 to "ok", 1100 to "ok", 1101 to "warning")) {
+            val r = RrEmissionStats.compute(listOf(100 to ms))
+            val line = RrEmissionStats.historicalAuthorityLine(2, 1, 0, 1, r)
+            assertTrue(line, line.contains("received=2 accepted=1 persisted=0 rejected=1"))
+            assertTrue(line, line.contains("coverage=$status largestGap=0s"))
+        }
+    }
+
     @Test
     fun cleanEndToEndStreamRatioIsAboutOne() {
         val rr = mutableListOf<Pair<Int, Int>>()

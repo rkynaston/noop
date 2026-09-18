@@ -26,7 +26,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "11.8.0"
+    const val CURRENT_VERSION = "11.8.1"
 
     data class Release(
         val version: String,
@@ -37,6 +37,15 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "11.8.1",
+            title = "Historical R-R authority",
+            date = "September 2026",
+            items = listOf(
+                "**Historical R-R authority.** Only historical/offload R-R is saved for WHOOP analytics. WHOOP realtime and standard Bluetooth R-R remain available to live displays and diagnostics.",
+                "**11.8.0 features preserved.** Includes Ryan's 11.8.0 functionality. Existing stored R-R is unchanged; this policy applies to newly received data.",
+            ),
+        ),
         Release(
             version = "11.8.0",
             title = uiString(R.string.l10n_app_changelog_a_gym_log_book_on_your_e0f00272),

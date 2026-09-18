@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "11.8.0"
+    static let currentVersion = "11.8.1"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,15 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "11.8.1",
+            title: "Historical R-R authority",
+            date: "September 2026",
+            items: [
+                "**Historical R-R authority.** Only historical/offload R-R is saved for WHOOP analytics. WHOOP realtime and standard Bluetooth R-R remain available to live displays and diagnostics.",
+                "**11.8.0 features preserved.** Includes Ryan's 11.8.0 functionality. Existing stored R-R is unchanged; this policy applies to newly received data.",
+            ]
+        ),
         Release(
             version: "11.8.0",
             title: "A gym log book on your wrist, a Coach you can switch off, and a Sync Strap shortcut",

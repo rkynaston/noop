@@ -841,7 +841,9 @@ class Backfiller(
             gapHist = sessionRrGapHist.toList(),
             fill = sessionRrFill.toList(),
         )
-        return com.noop.analytics.RrEmissionStats.logLine("historical", sessionRrOffered, sessionRrInserted, r)
+        return com.noop.analytics.RrEmissionStats.historicalAuthorityLine(
+            received = sessionRrOffered, accepted = sessionRrOffered,
+            persisted = sessionRrInserted, rejected = 0, r = r)
     }
 
     companion object {

@@ -9972,17 +9972,18 @@ class WhoopBleClient(
             .mapNotNull { (it.parsed["timestamp"] as? Number)?.toInt() }
             .maxOrNull() ?: now
         val streams: Streams = extractStreams(parsed, deviceClockRef = newestRealtimeTs, wallClockRef = now)
-        val batch = StreamPersistence.toBatch(streams)
+        val batch = StreamPersistence.toLiveWhoopBatch(streams)
         // #1118: the SECOND live transport. The standard 0x2A37 path above stamps a beat at the second
         // it arrived; this one stamps it from the strap's own record clock. The same beat reaching both
         // lands on two different seconds, which no same-second de-dup can collapse — the signature every
         // affected night prints as `crossSecondOverCount`.
-        if (batch.rr.isNotEmpty()) {
+        if (streams.rr.isNotEmpty()) {
             if (com.noop.analytics.RrEmissionStats.shouldEmitLiveCensus(lastRealtimeRrCensusSec, now)) {
                 lastRealtimeRrCensusSec = now
-                val census = com.noop.analytics.RrEmissionStats.compute(batch.rr.map { it.ts.toInt() to it.rrMs })
-                log(com.noop.analytics.RrEmissionStats.logLine("live-realtime", batch.rr.size, null, census))
+                val census = com.noop.analytics.RrEmissionStats.compute(streams.rr.map { it.ts to it.rrMs })
+                log(com.noop.analytics.RrEmissionStats.logLine("live-realtime", streams.rr.size, null, census))
             }
+            log("rr source=r10r11 liveReceived=${streams.rr.size} persisted=0 mode=ui-only")
         }
         if (!batch.isEmpty) {
             try {
@@ -10048,7 +10049,7 @@ class WhoopBleClient(
         if (shouldFlush) ioScope.launch { flushStandardHr() }
     }
 
-    /** Persist the buffered standard HR/RR. Re-buffers on failure. Port of `Collector.flushStandardHR`. */
+    /** Persist standard HR/contact, retrying those on failure. R-R is consumed as live-only. */
     private suspend fun flushStandardHr() {
         val (hr, rr, contact) = synchronized(collectorLock) {
             if (stdHr.isEmpty() && stdRr.isEmpty() && stdContact.isEmpty()) return
@@ -10070,13 +10071,15 @@ class WhoopBleClient(
                 // and this census runs before the insert. The line renders `inserted=n/a`.
                 log(com.noop.analytics.RrEmissionStats.logLine("live-standard", rr.size, null, census))
             }
+            log("rr source=standard liveReceived=${rr.size} persisted=0 mode=ui-only")
         }
         try {
-            addBankedLive(repository.insert(StreamBatch(hr = hr, rr = rr, events = contact), deviceId))
+            addBankedLive(repository.insert(StreamBatch(hr = hr, events = contact), deviceId))
             liveInsertFailuresStd.set(0)
         } catch (t: Throwable) {
             synchronized(collectorLock) {
-                stdHr.addAll(0, hr); stdRr.addAll(0, rr); stdContact.addAll(0, contact)
+                stdHr.addAll(0, hr); stdContact.addAll(0, contact)
+                // R-R already served its live consumers and has no durable sink to retry.
             }
             // Swallowing this made the instrumentation above read like success: a store failing every
             // insert produced a log full of `rr emit ... offered=N` and no sign that none of it landed.
@@ -10089,7 +10092,7 @@ class WhoopBleClient(
                     throwableName = t.javaClass.simpleName,
                     message = t.message,
                     hrFrames = hr.size,
-                    rrFrames = rr.size,
+                    rrFrames = 0,
                     consecutiveFailures = runLength,
                 ))
             }

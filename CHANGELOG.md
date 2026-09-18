@@ -17,6 +17,11 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 11.8.1: Historical R-R authority
+
+- **Historical R-R authority.** Only historical/offload R-R is saved for WHOOP analytics. WHOOP realtime and standard Bluetooth R-R remain available to live displays and diagnostics.
+- **11.8.0 features preserved.** Includes Ryan's 11.8.0 functionality. Existing stored R-R is unchanged; this policy applies to newly received data.
+
 ## 11.1.0: A clock you choose, sleep without motion, and logs that report instead of assuming (all platforms)
 
 **Choose how you read times**

@@ -335,8 +335,11 @@ class StandardHrSource(
             s.contact?.let { StandardHrMapping.contactEvent(s.ts, it) }
         }
         if (hrRows.isEmpty() && rrRows.isEmpty() && contactEvents.isEmpty()) return
+        if (rrRows.isNotEmpty()) {
+            log("HR-strap: rr source=standard liveReceived=${rrRows.size} persisted=0 mode=ui-only")
+        }
         log(standardHrFlushAttemptLine(reason.raw, hrRows.size, rrRows.size))
-        persist(StreamBatch(hr = hrRows, rr = rrRows, events = contactEvents), deviceId) { result ->
+        persist(StreamBatch(hr = hrRows, events = contactEvents), deviceId) { result ->
             result.fold(
                 onSuccess = { counts ->
                     insertFailures.set(0)
@@ -347,7 +350,8 @@ class StandardHrSource(
                     // Collector's `insert(contentsOf:at:0)`. Without this the rows were already gone the
                     // moment the snapshot was taken.
                     val (pendingHr, pendingRr) = synchronized(bufferLock) {
-                        buffer.addAll(0, snapshot)
+                        // Retry HR/contact only; live R-R has no durable sink.
+                        buffer.addAll(0, snapshot.map { it.copy(rr = emptyList()) })
                         val (h, r) = rowsOf(buffer)
                         h.size to r.size
                     }
@@ -368,7 +372,7 @@ class StandardHrSource(
                             throwableName = t.javaClass.simpleName,
                             message = t.message,
                             hrFrames = hrRows.size,
-                            rrFrames = rrRows.size,
+                            rrFrames = 0,
                             consecutiveFailures = runLength,
                         ))
                     }
