@@ -2781,4 +2781,5 @@
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">Un écran de stress qui suit le rythme, des mesures WHOOP 5 dans les unités que le bracelet envoie, et une bague qui cesse de se répéter</string>
     <string name="l10n_settings_screen_ai_coach_130c3eab">Coach IA</string>
     <string name="l10n_app_changelog_a_gym_log_book_on_your_e0f00272">Un carnet de musculation au poignet, un Coach que vous pouvez désactiver, et un raccourci pour synchroniser</string>
+    <string name="changelog_historical_rr_authority">Les données R-R historiques comme source de référence</string>
 </resources>

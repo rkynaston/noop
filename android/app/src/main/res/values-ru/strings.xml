@@ -2669,4 +2669,5 @@
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">Экран стресса, который успевает, показания WHOOP 5 в тех единицах, которые шлёт ремешок, и кольцо, которое перестаёт повторяться</string>
     <string name="l10n_settings_screen_ai_coach_130c3eab">ИИ-тренер</string>
     <string name="l10n_app_changelog_a_gym_log_book_on_your_e0f00272">Дневник тренировок на запястье, Coach, который можно выключить, и быстрая команда для синхронизации</string>
+    <string name="changelog_historical_rr_authority">Исторические данные R-R как основной источник</string>
 </resources>

@@ -2790,4 +2790,5 @@
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">Ekran stresu, który nadąża, odczyty WHOOP 5 w jednostkach wysyłanych przez opaskę i pierścień, który przestaje się powtarzać</string>
     <string name="l10n_settings_screen_ai_coach_130c3eab">Trener AI</string>
     <string name="l10n_app_changelog_a_gym_log_book_on_your_e0f00272">Dziennik treningowy na nadgarstku, Coach, którego możesz wyłączyć, i skrót do synchronizacji opaski</string>
+    <string name="changelog_historical_rr_authority">Historyczne dane R-R jako źródło referencyjne</string>
 </resources>
