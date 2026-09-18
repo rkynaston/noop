@@ -650,7 +650,8 @@ final class IntelligenceEngine: ObservableObject {
     /// Compute on-device scores for each of the last `maxDays` that actually has raw HR data.
     /// Personal baselines (HRV / resting HR) are folded from the imported history, so even the first
     /// live night can be scored against your norm.
-    func analyzeRecent(maxDays: Int = 21, force: Bool = true, skipIfUnchanged: Bool = false) async {
+    func analyzeRecent(maxDays: Int = 21, force: Bool = true, skipIfUnchanged: Bool = false,
+                       triggerLabel: String? = nil) async {
         // #899-A: a concurrent pass already holds the lock. A NON-forced idle tick is safe to drop (the
         // in-flight pass already covers the same window). But a FORCED call is a real update path (a
         // post-backfill rescore after a sync) , dropping it would leave a freshly-synced night unscored
@@ -695,7 +696,11 @@ final class IntelligenceEngine: ObservableObject {
         // import/edit/settings/recalibrate re-score — which changes scores WITHOUT changing the HR
         // fingerprint — always runs. Twin of the Android WhoopBleClient post-offload `newData` gate.
         if force, skipIfUnchanged, !wmKey.isEmpty, storedWatermark == wmKey {
-            diagnosticSink?("re-score: trigger=post-offload newData=no — skipped (nothing changed since last run)", nil)
+            // #2238: name the caller that actually skipped. This label was hardcoded while the post-offload
+            // path was the only one opting in; the resume opts in now, and a skip reported under someone
+            // else's name is the same wrong-caller trail #1538 lost three nights to.
+            let skipped = triggerLabel ?? "post-offload"
+            diagnosticSink?("re-score: trigger=\(skipped) newData=no — skipped (nothing changed since last run)", nil)
             return
         }
         // Attribute the re-score that is ABOUT TO RUN. `trigger=post-offload` was previously logged only on
@@ -714,14 +719,22 @@ final class IntelligenceEngine: ObservableObject {
         // `newData=no` means the fingerprint already equals the watermark the last run advanced: a re-score
         // driven by the trigger, not by data (#1005 background battery). Diagnostic only; the pass runs
         // either way. Twin of the Android WhoopBleClient / AppViewModel attribution.
-        let trigger = !force ? "idle" : (skipIfUnchanged ? "post-offload" : "forced")
+        // #2238: a caller that knows its own name says so. The derivation below reads
+        // `skipIfUnchanged` as "post-offload", which was an exact witness while that was the only
+        // caller opting in; the #1538 resume now opts in too when its debt came from a completed
+        // pass, and labelling it post-offload would put the investigation on the wrong caller for
+        // the second time in this area.
+        let trigger = triggerLabel ?? (!force ? "idle" : (skipIfUnchanged ? "post-offload" : "forced"))
         let hadNew = wmKey.isEmpty || storedWatermark != wmKey
         diagnosticSink?("re-score: trigger=\(trigger) "
                         + "newData=\(hadNew ? "yes" : "no (nothing changed since last run)")", nil)
 
         // #1005: time the whole pass — the trigger line above records WHY; this records how many nights
         // and how long (the CPU cost per run), so a re-score STORM is visible in the strap log.
-        let reScoreStart = Date()
+        // Uptime, not `Date()`: the elapsed figure below is banked as what a pass COSTS, and a wall clock
+        // also counts every minute the process spent suspended mid-pass. One overnight pass suspended by a
+        // sleeping phone banked 19 003 s, which then deferred every background re-score after it.
+        let reScoreStart = DispatchTime.now().uptimeNanoseconds
         computing = true
         // #1538: the pass is now past every gate and will do real work. Mark it started durably, so that a
         // process killed mid-pass leaves evidence a LATER process can read — the killed process itself gets
@@ -1049,7 +1062,9 @@ final class IntelligenceEngine: ObservableObject {
                 try? await store.rrIntervals(deviceId: o, from: f, to: t, limit: StreamReadCap.rr,
                                             unlabelledAliasOfWhoop5: activeWhoop5RR && o == Repository.whoopSource)
             }
+            var paceMark = DispatchTime.now().uptimeNanoseconds
             for offset in 0..<maxDays {
+                if offset > 0 { await RescoreBackgroundScheduler.paceIfBackgrounded(since: &paceMark) }
                 let dayStart = nowLocalMidnight - offset * 86_400
                 let day = AnalyticsEngine.dayString(dayStart, offsetSec: tzOffset)
                 // Read a generous window around the night that ends on `day`; the stager finds the span.
@@ -1930,10 +1945,10 @@ final class IntelligenceEngine: ObservableObject {
         var out: [Computed] = []
         var dailies: [DailyMetric] = []
         var cachedSleep: [CachedSleepSession] = []
-        var workoutRows: [WorkoutRow] = []
         // #510: backfilled fields for a REAL (non-detected) row a dropped bout collided with, grouped by
-        // the deviceId it must be upserted under (see the collision branch below) — never mixed into
-        // `workoutRows`, which is always written under `computedId`.
+        // the deviceId it must be upserted under (see the collision branch below). The detector remains an
+        // analytics/enrichment input, but the opt-in confirmation card is now the only creator of a new
+        // visible workout; legacy `sport="detected"` rows are preserved rather than reconciled here.
         var backfilledByDevice: [String: [WorkoutRow]] = [:]
         // Rest composite (0–100) per computed night, persisted as the `sleep_performance` metric
         // series so the dashboard's Rest score reflects the new composite, not raw efficiency.
@@ -2025,10 +2040,9 @@ final class IntelligenceEngine: ObservableObject {
         // CAPTURE-B (#814/#799): the universal dayOwner line rides every export, so its gate is "ANY mode
         // active" (TestCentre.active(.universal) == anyActive). Read once here, like the other gates.
         let universalTraceActive = TestCentre.active(.universal)
-        // Workouts & GPS test mode (#975): read the zero-cost gate ONCE before the scoring loop so the
-        // detected-bout persist/drop decision can emit ONE `.workouts` line per derived bout. Without this
-        // the auto path produced NO trace at all (the "mode was on but produced NO trace" report), so an
-        // "auto workout appeared then vanished" could not be explained from an export. Diagnostic only.
+        // Workouts & GPS test mode (#975/#2187): read the zero-cost gate ONCE before the scoring loop so
+        // each analytics-only/backfill decision can emit one `.workouts` line per derived bout. Diagnostic
+        // only; this path no longer publishes or reconciles generic workout rows.
         let workoutsTraceActive = TestCentre.active(.workouts)
         let oldestDay = AnalyticsEngine.dayString(nowLocalMidnight - (maxDays - 1) * 86_400,
                                                   offsetSec: tzOffset)
@@ -2040,7 +2054,9 @@ final class IntelligenceEngine: ObservableObject {
             nowLocalMidnight: nowLocalMidnight, now: now, offsetSec: tzOffset,
             maxDays: maxDays, strictCanonicalAlias: strictCanonicalAlias)
         var appliedLegacySnapshots: [String: LegacyScoreSnapshot] = [:]
+        var paceMark = DispatchTime.now().uptimeNanoseconds
         for night in scoredNights {
+            await RescoreBackgroundScheduler.paceIfBackgrounded(since: &paceMark)
             // #299: scope the edits to THIS day before folding. A userEdited row / hand-logged nap belongs
             // to exactly ONE day — the day its night ENDS on, matching the daily's end-day bucket. `endTs`
             // is stable under a bedtime edit (only the onset/`startTsAdjusted` moves), so end-day is the
@@ -2176,9 +2192,9 @@ final class IntelligenceEngine: ObservableObject {
                 restPoints.append(MetricPoint(day: daily.day, key: "rhr_primary_session_duration_s", value: cov.durationSec))
             }
             cachedSleep.append(contentsOf: night.cachedSleep)
-            // Persist the detected workouts the pipeline already computes (previously discarded).
-            // Skip any bout overlapping a real imported/manual workout so import+wear users don't
-            // double-count. sport = "detected"; energyKcal is the APPROXIMATE Keytel/BMR total.
+            // Keep the analytics detector as an enrichment input for real imported/manual workouts, but do
+            // not publish its generic bouts. The opt-in Today card is the single confirmation boundary for
+            // creating a visible workout; this pass neither creates nor reconciles `sport="detected"` rows.
             // #1545: where the detector lost every candidate workout on this day, emitted BEFORE the
             // per-bout loop so it is present even when that loop runs zero times — which is exactly the
             // report it exists for. The `effort bout` line below explains a bout that exists; a strap log
@@ -2229,15 +2245,9 @@ final class IntelligenceEngine: ObservableObject {
                     }
                     continue
                 }
-                workoutRows.append(WorkoutRow(startTs: s.start, endTs: s.end,
-                                              sport: "detected", source: computedId,
-                                              durationS: s.durationS, energyKcal: s.caloriesKcal,
-                                              avgHr: avgBpm, maxHr: s.peakHR,
-                                              strain: s.strain, distanceM: nil,
-                                              zonesJSON: nil, notes: nil, steps: nil))
                 if workoutsTraceActive {
                     diagnosticSink?(WorkoutsTrace.detectedBoutLine(
-                        verdict: "persisted", durMin: durMin, avgBpm: avgBpm), .workouts)
+                        verdict: "analyticsOnly", durMin: durMin, avgBpm: avgBpm), .workouts)
                 }
             }
         }
@@ -2793,15 +2803,10 @@ final class IntelligenceEngine: ObservableObject {
         } else {
             healRearmedThisCycle = false
         }
-        // Make re-detection idempotent across runs: clear the prior computed detected workouts in the
-        // scored window (a bout's startTs can drift as more HR arrives, which would otherwise orphan
-        // stale rows under the (deviceId,startTs,sport) key), then re-insert.
-        _ = try? await store.deleteWorkouts(deviceId: computedId, sport: "detected",
-                                            from: windowStart, to: now)
-        if !workoutRows.isEmpty { _ = try? await store.upsertWorkouts(workoutRows, deviceId: computedId) }
-        // #510: write back any real (manual/imported) rows a dropped detected bout backfilled, one
-        // upsert per owning deviceId (see the collision branch above for why these can't share the
-        // `computedId` batch above).
+        // #1735/#2187: never delete/reinsert legacy detected history during scoring. A disabled toggle,
+        // rescoring pass, missing stream or failed insert must not erase a workout the user already saw.
+        // #510: still write back any real (manual/imported) rows an analytics bout backfilled, one upsert
+        // per owning deviceId.
         for (devId, rows) in backfilledByDevice {
             _ = try? await store.upsertWorkouts(rows, deviceId: devId)
         }
@@ -2843,7 +2848,7 @@ final class IntelligenceEngine: ObservableObject {
         // measurement is what lets `RescoreBackgroundPolicy` tell an install that finishes comfortably in a
         // background wake from one that never could, instead of guessing from a constant — the cost varies
         // by more than an order of magnitude with history size.
-        let elapsed = Date().timeIntervalSince(reScoreStart)
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds &- reScoreStart) / 1_000_000_000
         let settled = RescoreBackgroundScheduler.markRescoreCompleted(seconds: elapsed, owedToken: owedToken)
         diagnosticSink?("re-score: done — scored \(scoredNights.count) night(s) in \(Int(elapsed * 1000)) ms (#1005)", nil)
         // #1681: a pass that completes while leaving the mark SET looks identical in a capture to one that

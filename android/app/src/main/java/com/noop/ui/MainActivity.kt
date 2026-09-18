@@ -1091,6 +1091,42 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_QUIET_MOTION, enabled).apply()
     }
 
+    /**
+     * When the live /models catalogue was last pulled for a provider, epoch millis, keyed per
+     * provider so switching does not hide a stale list behind another provider's refresh.
+     *
+     * Exists so the model picker can carry what the provider offers TODAY without this app shipping a
+     * new build for every model release. The built-in lists stay as the offline seed.
+     */
+    fun coachModelsRefreshedAt(context: Context, provider: String): Long =
+        of(context).getLong("noop.coachModelsRefreshed.$provider", 0L)
+
+    fun setCoachModelsRefreshedAt(context: Context, provider: String, atMillis: Long) {
+        of(context).edit().putLong("noop.coachModelsRefreshed.$provider", atMillis).apply()
+    }
+
+    /** Master switch for the AI Coach, offered in Settings under Bottom bar because the Coach tab is
+     *  what a wearer sees it as (#2218 promoted Coach to a top-level tab). Default ON, matching every
+     *  install that shipped with the tab.
+     *
+     *  This is NOT tab chrome. Turning it off disables the AI itself: the tab goes, the Today launcher
+     *  card goes, and the daily brief scheduler is cancelled. That last one is why this is a single pref
+     *  rather than a per-surface hide - CoachBriefScheduler is a SEPARATE default-off feature with its
+     *  own `enabled` flag that makes a provider call from the background and posts a notification, so
+     *  hiding only the tab would leave a wearer who had enabled briefs still receiving AI output from a
+     *  feature they had just switched off.
+     *
+     *  Saved provider keys are deliberately KEPT. The switch is meant to be reversible, and wiping a key
+     *  a wearer pasted in would make turning it back on a re-setup rather than a flip. */
+    const val KEY_COACH_ENABLED = "noop.coachEnabled"
+
+    fun coachEnabled(context: Context): Boolean =
+        of(context).getBoolean(KEY_COACH_ENABLED, true)
+
+    fun setCoachEnabled(context: Context, enabled: Boolean) {
+        of(context).edit().putBoolean(KEY_COACH_ENABLED, enabled).apply()
+    }
+
     /** Coach on-device signals (v5): when ON, the opt-in BYO-key Coach's grounding context may include a
      *  SUMMARY-ONLY line of on-device correlations + Lab Book markers (no raw egress). A SECOND opt-in on
      *  top of the existing "let the coach use my data" consent. Default OFF, keeps the anonymity posture. */
@@ -1134,7 +1170,8 @@ object NoopPrefs {
     /** "Auto-detect workouts" (MVP, opt-in, on-device, NON-DESTRUCTIVE). When ON, NOOP scans the last
      *  day or two of strap HR for a sustained-elevated bout and surfaces ONE dismissible Today card
      *  suggesting you save it, it NEVER creates a workout on its own (the user taps Save). Default OFF;
-     *  when off no detection runs and no card shows. Mirrors macOS/iOS @AppStorage("autoDetectWorkouts"). */
+     *  when off no detection runs and no card shows, while existing workout history is retained. Mirrors
+     *  macOS/iOS @AppStorage("autoDetectWorkouts"). */
     const val KEY_AUTO_DETECT_WORKOUTS = "noop.autoDetectWorkouts"
 
     fun autoDetectWorkouts(context: Context): Boolean =

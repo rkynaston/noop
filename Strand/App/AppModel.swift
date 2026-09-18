@@ -670,13 +670,31 @@ final class AppModel: ObservableObject {
     /// so that it cannot mark unscored data as scored — so gating on the fingerprint here would be asking
     /// a question whose answer is already known to be "yes, there is work".
     func runDeferredRescoreIfOwed() async {
-        guard RescoreBackgroundScheduler.isRescoreOwed else { return }
-        live.append(log: "re-score: resuming a pass an earlier attempt could not finish (#1538)")
-        await intelligence.analyzeRecent()
+        // A pass already running here holds the owed mark itself and settles it when it finishes; forcing
+        // another would only queue a second full pass behind it.
+        guard RescoreBackgroundScheduler.isRescoreOwed, !intelligence.computing else { return }
+        // #2238: force only when the debt is UNPROVEN — an interrupted pass, whose watermark was
+        // deliberately never advanced. A pass that COMPLETED and was merely outvoted by a token recorded
+        // mid-pass did advance it, so asking the fingerprint is a real question with a real answer, and a
+        // "nothing changed" answer is the only thing that lets this chain stop.
+        //
+        // Without it a ring draining every 5 minutes re-scores 21 nights continuously while the app is
+        // awake: each pass runs longer than the drain interval, so it always finishes owing a newer debt,
+        // and the resume forces the next one whether or not a single row moved.
+        let fromCompletedPass = RescoreBackgroundScheduler.isOwedAfterCompletedPass
+        live.append(log: "re-score: resuming a pass an earlier attempt could not finish (#1538)"
+                    + (fromCompletedPass ? " — debt is from a completed pass, gating on the fingerprint (#2238)" : ""))
+        await intelligence.analyzeRecent(skipIfUnchanged: fromCompletedPass,
+                                         triggerLabel: fromCompletedPass ? "resume-gated" : "resume-forced")
         #if os(iOS)
         // The deferred pass is the one that finally produces today's score, and it runs with no UI
         // attached — so publish the snapshot here too, for the same reason the post-offload path does.
         await WidgetSnapshot.publish(from: self)
+        // Apple Health too. The post-offload write-back ran BEFORE this pass (the offload deferred its
+        // re-score here), so it published the store as it stood then: last night's sleep and vitals were
+        // not scored yet and only reached Health on some later foreground. This is the first moment they
+        // exist. The bridge coalesces a call that lands during an in-flight write-back.
+        await healthWriteBack?()
         #endif
     }
 
@@ -699,7 +717,8 @@ final class AppModel: ObservableObject {
         // the #1538 report while never producing a score. Decide first whether this pass can finish here,
         // and hand it to a background-processing task when it cannot. A no-op on macOS, and on iOS a
         // foreground pass is never deferred.
-        await RescoreBackgroundScheduler.run(log: { [live] line in live.append(log: line) }) {
+        await RescoreBackgroundScheduler.run(passInProgress: intelligence.computing,
+                                             log: { [live] line in live.append(log: line) }) {
             await intelligence.analyzeRecent(skipIfUnchanged: true)
         }
         await refreshV5Signals()
@@ -895,6 +914,18 @@ final class AppModel: ObservableObject {
     /// Finish the active workout: finalize the GPS route (#524), score the captured HR window, and save it
     /// as a `WorkoutRow`. A session with no HR window AND no real GPS route is discarded quietly (parity
     /// with Android) , but a GPS-only walk with HR not streaming still saves. Double-buzz confirms.
+    /// Shortest live session worth keeping. Below this a start/stop is an accident, not training (#2278).
+    static let minimumWorkoutSeconds: TimeInterval = 60
+
+    /// Whether a finished live session is too short to save.
+    ///
+    /// A named predicate rather than an inline comparison so the boundary is pinned by a test and so the
+    /// Android twin has one thing to mirror. Exactly `minimumWorkoutSeconds` is KEPT: a wearer who logs a
+    /// deliberate one-minute effort gets to keep it, and the discard is for what falls short of that.
+    nonisolated static func isTooShortToSave(elapsedSeconds: TimeInterval) -> Bool {
+        elapsedSeconds < minimumWorkoutSeconds
+    }
+
     func endWorkout() {
         guard let w = activeWorkout else { return }
         activeWorkout = nil
@@ -924,6 +955,26 @@ final class AppModel: ObservableObject {
             return
         }
         let end = Date()
+        // A session under a minute is a start/stop the wearer did not mean to keep, and it was the thing
+        // that made deletion feel broken: the list filled with 5-30 second entries (#2278). Discarded HERE,
+        // at save, rather than retained and pruned later, which is the whole difference between dropping
+        // something that never had training data in it and deleting a wearer's history. NOOP has no server
+        // and no cloud copy, so a later prune would be irreversible; this is not, because nothing with real
+        // data is ever removed.
+        //
+        // Sits after the sample/route gate above so that gate's meaning is unchanged: a 30-second session
+        // can easily carry two HR samples and would otherwise have been saved.
+        let elapsed = w.elapsed(at: end)
+        if Self.isTooShortToSave(elapsedSeconds: elapsed) {
+            emitWorkoutsTrace(WorkoutsTrace.sessionLine(
+                event: "discarded", sportKey: WorkoutSource.traceSportKey(w.sport),
+                hrSamples: samples.count, durationSec: Int(elapsed),
+                gpsPoints: wasGps ? gpsRecorder.pointCount : nil))
+            // Drop the route too: keeping a polyline for a session that was never saved would orphan it in
+            // RouteStore under a natural key no row claims.
+            lastWorkout = nil
+            return
+        }
         let avg = samples.isEmpty ? nil
             : Int((Double(samples.map(\.bpm).reduce(0, +)) / Double(samples.count)).rounded())
         let peak = samples.map(\.bpm).max()
@@ -1634,10 +1685,28 @@ final class AppModel: ObservableObject {
 
     // MARK: - Physical inputs / wear automation
 
+    /// Set by a running Lift Log session to CLAIM the strap's double-tap for the duration of that
+    /// session, so a set can be logged without picking the phone up — the one cue that works with the
+    /// phone face-down on a bench. Cleared when the session ends, handing the gesture straight back to
+    /// whatever the user has configured; nothing about their setting is read or written.
+    ///
+    /// A double tap rather than a single one because a strap takes knocks against bars and benches all
+    /// session, and two deliberate taps are not something a rack does by accident.
+    var strapDoubleTapOverride: (() -> Void)?
+
     private func handleDoubleTap() {
         let now = Date()
-        guard now.timeIntervalSince(lastDoubleTapAt) > 1.2 else { return }   // debounce repeats
+        let since = now.timeIntervalSince(lastDoubleTapAt)
+        guard since > 1.2 else {   // debounce repeats
+            live.append(log: String(format: "Double-tap ignored: %.1f s after the previous one (debounce 1.2 s)", since))
+            return
+        }
         lastDoubleTapAt = now
+        if let override = strapDoubleTapOverride {
+            live.append(log: "Double-tap → Lift Log: next")
+            override()
+            return
+        }
         live.append(log: "Double-tap → \(behavior.doubleTapAction.label)")
         runMacAction(behavior.doubleTapAction, shortcut: behavior.doubleTapShortcut)
     }

@@ -46,11 +46,7 @@ object StreamPersistence {
         // gravity/steps/ppgHr remain type-47-only (historical offload), unchanged.
     )
 
-    /**
-     * WHOOP live transport persistence policy (NOOP 11.7.1). Live R-R has already reached StateFlow/UI
-     * before this mapping runs; only its durable representation is removed. Historical offload does not
-     * use this helper and continues to persist every decoded R-R interval through its existing model.
-     */
+    /** WHOOP realtime transport is live/UI-only for R-R. Historical offload remains authoritative. */
     fun toLiveWhoopBatch(streams: Streams): StreamBatch = toBatch(streams).copy(rr = emptyList())
 
     /**

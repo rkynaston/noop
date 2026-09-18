@@ -346,14 +346,19 @@ def _required_v3_exemptions(
     current_findings: set[str],
 ) -> set[tuple[str, str]]:
     required: set[tuple[str, str]] = set()
-    for name in (
-        "unpaired_files",
-        "unpaired_functions",
-        "unpaired_properties",
-        "unpaired_constants",
+    # Explicit singulars rather than name[:-1]: "unpaired_properties" stems to
+    # "unpaired-propertie", which _validate_dispositions does not accept, so a one-sided
+    # property could be REQUIRED to carry a disposition that could never be written. Every
+    # other set survives the naive strip, which is why this went unnoticed: no test had a
+    # one-sided property until Lift Log added two.
+    for name, singular in (
+        ("unpaired_files", "unpaired-file"),
+        ("unpaired_functions", "unpaired-function"),
+        ("unpaired_properties", "unpaired-property"),
+        ("unpaired_constants", "unpaired-constant"),
     ):
         for identity in set(current_sets[name]) - set(base_sets[name]):
-            required.add((f"add-{name[:-1].replace('_', '-')}", identity))
+            required.add((f"add-{singular}", identity))
     for name in ("function_pairs", "property_pairs", "constant_pairs"):
         for identity in set(base_sets[name]) - set(current_sets[name]):
             required.add((f"remove-{name[:-1].replace('_', '-')}", identity))
@@ -403,6 +408,8 @@ def compare_metadata(
     base: str,
     *,
     offline: bool,
+    repair_stale_base: bool = False,
+    migrate_authority: bool = False,
     warnings: list[str] | None = None,
 ) -> list[str]:
     """Compare current governance metadata with the exact requested base."""
@@ -440,12 +447,61 @@ def compare_metadata(
         with _base_tree(root, base) as base_root:
             base_sets = parity_ledger.semantic_authority(base_root)
             base_manifest = parity_ledger.authority_manifest(base_sets)
-            if old_map["authority"] != base_manifest:
-                errors.append(
-                    f"{TWIN_MAP_PATH}: base authority cannot be reproduced with the current derivation; migration required"
-                )
             base_scan_map = parity_ledger.build_compact_twin_map(base_root)
+            base_scan_map["exemptions"] = old_registry["dispositions"]
             base_scan = parity_ledger.scan(base_root, base_scan_map)
+        base_authority_is_stale = old_map["authority"] != base_manifest
+        if base_authority_is_stale:
+            repair_mismatches: list[str] = []
+            if current_sets != base_sets:
+                repair_mismatches.append("semantic authority differs from the exact base")
+            if ({item.identity for item in current_scan.findings}
+                    != {item.identity for item in base_scan.findings}):
+                repair_mismatches.append("finding identities differ from the exact base")
+            if current_scan.counters != base_scan.counters:
+                repair_mismatches.append("counters differ from the exact base")
+            if current_registry != old_registry:
+                repair_mismatches.append("typed dispositions differ from the exact base")
+            if current_map["authority"] != current_manifest:
+                repair_mismatches.append("current authority is not exactly derived")
+            if current_baseline != parity_ledger.build_compact_baseline(current_scan):
+                repair_mismatches.append("current baseline is not exactly derived")
+            if migrate_authority:
+                # The base's checked-in authority cannot be reproduced by the current derivation,
+                # so there is no exact basis to compare against and `--repair-stale-base` cannot
+                # help: repair exists for a base whose GOVERNED STATE matches, and here it does not.
+                #
+                # Migration re-bases the comparison onto a freshly derived base authority. It
+                # deliberately waives only the reproducibility of the base's stored manifest. It
+                # waives NO semantic debt: `required` below is computed from the freshly derived
+                # base and current sets, so every new one-sided declaration still needs its own
+                # issue-bound disposition, and an undeclared one still fails.
+                if current_map["authority"] != current_manifest:
+                    errors.append(
+                        f"{TWIN_MAP_PATH}: authority migration requires an exactly derived current "
+                        "authority; refresh the snapshots rather than hand-editing them"
+                    )
+                else:
+                    warnings.append(
+                        f"{TWIN_MAP_PATH}: base authority at {base} is not reproducible with the "
+                        "current derivation; migrated onto a freshly derived base. New debt still "
+                        "requires issue-bound dispositions."
+                    )
+            elif not repair_stale_base:
+                errors.append(
+                    f"{TWIN_MAP_PATH}: base authority cannot be reproduced with the current derivation; "
+                    "migration required (see --migrate-authority)"
+                )
+            elif repair_mismatches:
+                errors.append(
+                    f"{TWIN_MAP_PATH}: stale-base repair rejected because "
+                    + "; ".join(repair_mismatches)
+                )
+            else:
+                warnings.append(
+                    f"{TWIN_MAP_PATH}: repaired stale metadata already present in the exact base; "
+                    "no current-tree governance delta accepted"
+                )
         base_findings = {item.identity for item in base_scan.findings}
         current_findings = {item.identity for item in current_scan.findings}
         required = _required_v3_exemptions(
@@ -616,13 +672,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--base", help="base ref; defaults durably to origin/main")
     parser.add_argument("--offline", action="store_true", help="skip GitHub issue existence checks")
+    parser.add_argument(
+        "--repair-stale-base",
+        action="store_true",
+        help="adopt exactly derived metadata only when governed state is unchanged from an already-stale base",
+    )
+    parser.add_argument(
+        "--migrate-authority",
+        action="store_true",
+        help="re-base onto a freshly derived base authority when the base's stored one cannot be "
+             "reproduced; new debt still requires issue-bound dispositions",
+    )
     args = parser.parse_args(argv)
+    if args.repair_stale_base and args.migrate_authority:
+        parser.error("--repair-stale-base and --migrate-authority are different remedies; use one")
     root = args.root.resolve()
     try:
         base = resolve_base(root, args.base)
         warnings: list[str] = []
         errors = repository_consistency_errors(root, warnings=warnings)
-        errors.extend(compare_metadata(root, base, offline=args.offline, warnings=warnings))
+        errors.extend(compare_metadata(
+            root,
+            base,
+            offline=args.offline,
+            repair_stale_base=args.repair_stale_base,
+            migrate_authority=args.migrate_authority,
+            warnings=warnings,
+        ))
         for warning in warnings:
             print(f"WARNING: {warning}", file=sys.stderr)
         return _print_errors(errors)

@@ -107,9 +107,15 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
     var isWhoop5 by remember { mutableStateOf(false) }
     var everSpo2 by remember { mutableStateOf(true) }
     var everResp by remember { mutableStateOf(true) }
+    // What the source pill calls the owned source: the active device's registry display name (nickname,
+    // else "Brand Model"), so an active Oura ring reads "Oura …" over the ring's own series instead of the
+    // strap label this row shipped with. null (no registry row) keeps the legacy "My WHOOP". Mirrors iOS
+    // FullDayChartView.sourceName.
+    var sourceName by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(deviceId) {
         val d = runCatching { vm.pairedDevices() }.getOrDefault(emptyList())
             .firstOrNull { it.id == deviceId }
+        sourceName = d?.let(::displayName)
         // A positive "is it a 5/MG", never a coalesced one (#1086): the respiration copy tells the reader
         // their estimate is on the Health screen, which is true for a WHOOP 5 (the R-R RSA estimate runs)
         // and false for a non-WHOOP device whose banked stream that estimate refuses.
@@ -209,9 +215,9 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
             )
         }
 
-        // SOURCE PILL — the owned strap, with the #574 owned/all scope toggle.
+        // SOURCE PILL — the owned (active) device, with the #574 owned/all scope toggle.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(stringResource(R.string.timeline_my_whoop), style = NoopType.footnote, color = Palette.textSecondary)
+            Text(sourceName ?: stringResource(R.string.timeline_my_whoop), style = NoopType.footnote, color = Palette.textSecondary)
             Spacer(Modifier.weight(1f))
             val ownedLabel = stringResource(R.string.timeline_owned)
             val allLabel = stringResource(R.string.timeline_all)

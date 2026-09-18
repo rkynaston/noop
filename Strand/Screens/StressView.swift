@@ -136,15 +136,40 @@ struct StressView: View {
         // decides how often that hour is re-read, so a thin ten minutes costs the windows that overlap
         // it rather than a whole hour of chart. The Today card and the widget have always asked for
         // this; the screen people actually study was the one still stepping. Twin of the Kotlin change.
-        daytime = DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz, mode: mode,
-                                        includeTimeline: true)
+        // #2181: this is pure, database-free computation over a whole local day of samples, and it used
+        // to run inline on this view's (main) actor. `analyze` memoises behind a lock-guarded
+        // `AnalyticsMemoCache`, so it is safe off the main actor and the Today card already reads its own
+        // stress the same way. Moving it here is what lets the timeline be published — and drawn — before
+        // the advanced readouts below are started.
+        //
+        // `runUnescalated`, NOT `await Task.detached(...).value`: awaiting a task from a @MainActor
+        // caller makes it a child and hands it the caller's priority, so a `.utility` label on a
+        // detached task is decorative and the work races the UI for cores anyway. StressDayCurve
+        // learned that on this same issue; the continuation in UnescalatedWork is what keeps the
+        // priority honest.
+        daytime = await runUnescalated(priority: .userInitiated) {
+            DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz, mode: mode,
+                                  includeTimeline: true)
+        }
 
         // ADDITIVE advanced readouts, computed on-demand from the SAME `rr` (no extra fetch, no
         // DB / schema change, and no effect on the 0..3 score above). Each engine returns nil when
         // its own gate is not met (Baevsky needs >= 20 clean beats; freq-HRV needs >= 60 s span),
         // in which case its row is simply hidden.
-        stressIndex = StressIndex.components(rr: rr)
-        freqHRV = HRVFreqDomain.freqDomain(rr: rr)
+        // A SECOND hop on purpose (#2181). `HRVFreqDomain` is a Lomb-Scargle periodogram: its cost is
+        // (clean beats x frequency-grid steps) with a transcendental per step, and it takes whatever beat
+        // count the day's read returned — the store read above is bounded at 200 000, this is not bounded
+        // at all. On a live-banked day that is seconds of arithmetic, and run inline it held the main
+        // thread for all of them, which is why the screen stayed blank rather than drawing the timeline it
+        // already had. Both engines are pure statics over the same `rr`, so they compute together off the
+        // main actor and publish when done; their card is hidden until then, exactly as it is when a gate
+        // is unmet. Same `runUnescalated` reasoning as above, and the default `.utility` is real here
+        // because nothing escalates it: this is the phase that must yield to the UI.
+        let advanced = await runUnescalated {
+            (index: StressIndex.components(rr: rr), freq: HRVFreqDomain.freqDomain(rr: rr))
+        }
+        stressIndex = advanced.index
+        freqHRV = advanced.freq
     }
 
     /// Trailing local days folded into the personal daytime baselines the `.baselineRelative` mode
@@ -278,7 +303,7 @@ struct StressView: View {
                         let drawnPeak = day.timeline.filter { $0.level != nil }
                             .max { ($0.level ?? 0) < ($1.level ?? 0) }
                         if let peak = drawnPeak, let lvl = peak.level {
-                            Text("peak \(String(format: "%.1f", lvl)) · \(hourLabel(peak.hour))")
+                            Text("peak \(StressTrace.formatLevel(lvl)) · \(hourLabel(peak.hour))")
                                 .font(StrandFont.captionNumber)
                                 .foregroundStyle(StressRamp.color(lvl))
                         }
@@ -327,7 +352,7 @@ struct StressView: View {
     private func timelineTrailing(_ day: DaytimeStress.Result) -> String {
         let n = day.scored.count
         guard let mean = day.dayMean else { return String(localized: "\(n)h") }
-        return String(localized: "avg \(String(format: "%.1f", mean)) · \(n)h")
+        return String(localized: "avg \(StressTrace.formatLevel(mean)) · \(n)h")
     }
 
     /// The timeline's explanatory line, honest about WHICH reference each hour was scored against —
@@ -493,7 +518,7 @@ struct StressView: View {
             // Today's stress value, with its band as the caption.
             StatTile(
                 label: "Stress",
-                value: String(format: "%.1f", model.score),
+                value: StressTrace.formatLevel(model.score),
                 caption: String(localized: "of 3 · \(model.band.title)"),
                 accent: StressRamp.color(model.score),
                 sparkline: model.sparkValues.count > 1 ? model.sparkValues : nil,
@@ -575,7 +600,7 @@ struct StressView: View {
                 ChartCard(
                     title: "Stress · \(range.label)",
                     subtitle: String(localized: "Daily 0-3 proxy"),
-                    trailing: String(localized: "avg \(String(format: "%.1f", avg))"),
+                    trailing: String(localized: "avg \(StressTrace.formatLevel(avg))"),
                     tint: StressRamp.calm
                 ) {
                     TrendChart(
@@ -584,14 +609,14 @@ struct StressView: View {
                         valueRange: 0...3,
                         showsArea: true,
                         height: NoopMetrics.chartHeight,
-                        valueFormat: { String(format: "%.1f", $0) },
+                        valueFormat: { StressTrace.formatLevel($0) },
                         accessibilityLabel: String(localized: "Stress trend"),
                         yDomain: 0...yTop
                     )
                 } footer: {
                     ChartFooter([
-                        ("Today", String(format: "%.1f", model.score)),
-                        ("Average", String(format: "%.1f", avg)),
+                        ("Today", StressTrace.formatLevel(model.score)),
+                        ("Average", StressTrace.formatLevel(avg)),
                         ("Days", "\(points.count)"),
                     ])
                 }
@@ -686,7 +711,7 @@ private struct StressHeroGauge: View {
                 // so the score is passed straight through — no external roll state needed.
                 CountUpText(
                     value: score,
-                    format: { String(format: "%.1f", $0) },
+                    format: { StressTrace.formatLevel($0) },
                     font: StrandFont.rounded(34, weight: .bold),
                     color: .white
                 )
@@ -698,7 +723,7 @@ private struct StressHeroGauge: View {
             .allowsHitTesting(false)   // taps fall through to the vessel → splash
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Stress \(String(format: "%.1f", score)) of 3")
+        .accessibilityLabel(String(localized: "Stress \(StressTrace.formatLevel(score)) of 3"))
     }
 }
 
@@ -1121,7 +1146,7 @@ struct DaytimeLoadLine: View {
     private var accessibilitySummary: String {
         let scored = hours.compactMap { p in p.level.map { (p.hour, $0) } }
         guard !scored.isEmpty else { return String(localized: "No intraday stress data yet today.") }
-        let parts = scored.map { "\($0.0):00 \(String(format: "%.1f", $0.1))" }
+        let parts = scored.map { "\($0.0):00 \(StressTrace.formatLevel($0.1))" }
         return String(localized: "Autonomic load today: \(parts.joined(separator: ", "))")
     }
 }
@@ -1299,7 +1324,7 @@ private struct StressPreviewHarness: View {
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)],
                           alignment: .leading, spacing: NoopMetrics.gap) {
-                    StatTile(label: "Stress", value: String(format: "%.1f", score),
+                    StatTile(label: "Stress", value: StressTrace.formatLevel(score),
                              caption: "of 3 · \(band.title)", accent: StressRamp.color(score))
                     StatTile(label: "Resting HR", value: "54 bpm", accent: StrandPalette.metricRose,
                              delta: "+3 vs base", deltaColor: StrandPalette.statusWarning)
@@ -1312,9 +1337,9 @@ private struct StressPreviewHarness: View {
                 ChartCard(title: "Stress · M", subtitle: "Daily 0-3 proxy", trailing: "avg 1.5") {
                     TrendChart(points: sampleStressTrend(30), gradient: StressRamp.gradient,
                                valueRange: 0...3, showsArea: true, height: NoopMetrics.chartHeight,
-                               valueFormat: { String(format: "%.1f", $0) })
+                               valueFormat: { StressTrace.formatLevel($0) })
                 } footer: {
-                    ChartFooter([("Today", String(format: "%.1f", score)), ("Average", "1.5"), ("Days", "30")])
+                    ChartFooter([("Today", StressTrace.formatLevel(score)), ("Average", "1.5"), ("Days", "30")])
                 }
                 SegmentedPillControl(ExploreRange.allCases, selection: $range,
                                      adaptsToAvailableWidth: true) { $0.label }

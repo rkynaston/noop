@@ -26,8 +26,8 @@ android {
         applicationId = "com.noop.whoop"
         minSdk = 26
         targetSdk = 34
-        versionCode = 508
-        versionName = "11.7.1"
+        versionCode = 520
+        versionName = "11.8.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -299,6 +299,8 @@ dependencies {
     testImplementation("org.json:json:20240303") // real org.json for JVM unit tests (android.jar ships throwing stubs)
     testImplementation("net.sf.kxml:kxml2:2.3.0") // real XmlPullParser for JVM tests (android.util.Xml is a throwing stub)
     testImplementation("org.xerial:sqlite-jdbc:3.41.2.2") // execute DAO aggregate SQL in plain-JVM tests
+    testImplementation("androidx.room:room-testing:$roomVersion") // create a prior DB from exported schemas
+    testImplementation("org.robolectric:robolectric:4.13") // run the real Room open/migration in Linux CI (#1803)
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

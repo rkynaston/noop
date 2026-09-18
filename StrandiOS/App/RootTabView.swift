@@ -14,8 +14,17 @@ struct RootTabView: View {
     /// `NavigationStack(path:)` — which is every primary tab in this file, bound deliberately so a tab
     /// root can pop and re-scroll. So this may well be inert on our structure, and defaulting ON would
     /// advertise a behaviour that never happens. Off until someone confirms it on an iOS 26 device.
+    /// The Coach master switch, under the same `noop.` key Android writes. Default ON, so every install
+    /// that shipped with the tab is unchanged.
+    ///
+    /// Not tab chrome: with this off the AI is off. The tab goes, the Today launcher card goes, and the
+    /// daily brief is cancelled, because the brief calls a provider from the BACKGROUND with no UI
+    /// attached and would otherwise keep posting AI notifications for a feature the wearer switched off.
+    @AppStorage("noop.coachEnabled") private var coachEnabled = true
     @AppStorage("noop.bottomBarAutoHide") private var bottomBarAutoHide = false
 
+    /// The live gym session, owned at the app root — see `LiftSessionController`.
+    @EnvironmentObject private var liftSession: LiftSessionController
     /// External entry points must wait until the mandatory first-run gates have completed. The root owns
     /// that state; keeping it explicit here prevents this shell's window-level sheet from covering a gate.
     let homeScreenQuickActionsEnabled: Bool
@@ -122,10 +131,22 @@ struct RootTabView: View {
             tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
             // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
             // matches the More-tab row and the macOS sidebar entry.
-            tab(CoachView(), "Coach", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
+            // Conditional on the master switch. The tags stay LITERAL rather than being renumbered when
+            // Coach is absent: `tabPaths` and `scrollTop` are indexed by tag, and More stays tag 4 in both
+            // shapes, so a wearer's More tab keeps its identity, its navigation path and its scroll
+            // position across a flip instead of inheriting Coach's.
+            if coachEnabled {
+                tab(CoachView(), "Coach", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
+            }
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
+        // Switching Coach off while STANDING on it leaves `selectedTab` pointing at a tag no tab claims
+        // any more, which renders as an empty tab rather than as an error. Send that wearer to Today, and
+        // only in that case, so a flip made from anywhere else does not move them.
+        .onChangeCompat(of: coachEnabled) { enabled in
+            if !enabled && selectedTab == 3 { selectedTab = 0 }
+        }
         // #1841: the same "Hide bar when scrolling" preference Android drives its own bar with. Here the
         // system owns the behaviour — iOS 26's tab bar MINIMISES to a pill on scroll down rather than
         // sliding away entirely, so this is the platform's read of the same intent, not a copy of ours.
@@ -192,6 +213,16 @@ struct RootTabView: View {
             case .coach:
                 // K3: Coach is now a top-level tab (tag 3) — switch to it directly instead of
                 // presenting it as a pillar sheet.
+                //
+                // Guarded on the master switch, because this route is reachable with Coach OFF. A brief
+                // notification already sitting in Notification Centre still calls `openCoach()` when it is
+                // tapped (StrandApp wires `onCoachBriefTapped` to it), and with no tab claiming tag 3 the
+                // wearer would land on a BLANK tab. Dropping the request leaves them where they were, which
+                // is the honest answer for a feature that is switched off.
+                guard coachEnabled else {
+                    router.requestedDestination = nil
+                    break
+                }
                 withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 3 }
                 router.requestedDestination = nil
             case .trends:
@@ -240,6 +271,29 @@ struct RootTabView: View {
         }
         .onChange(of: homeScreenQuickActionsEnabled) { _, _ in
             presentPendingHomeScreenQuickActionIfPossible()
+        }
+        // The running gym session, reachable from ANY tab. It sits above the tab bar rather than
+        // inside the Lift Log screen, because a workout outlives whichever screen you wandered to —
+        // and because swiping the sheet away must minimise the session, not end it.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if liftSession.isActive {
+                LiftSessionBar()
+                    .padding(.horizontal, 14)
+                    // Clear the floating tab bar with the same constant every screen uses, or the
+                    // session bar sits on top of the tab labels.
+                    .padding(.bottom, NoopMetrics.tabBarClearance)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: liftSession.isActive)
+        .sheet(isPresented: $liftSession.isPresented) {
+            LiftSessionView { }
+        }
+        // A session left running by a previous launch comes back as the BAR, not as a sheet thrown
+        // in the user's face — they open it when they want it.
+        .task {
+            guard !liftSession.isActive, let snapshot = LiftSessionPersistence.load() else { return }
+            liftSession.resume(from: snapshot)
         }
     }
 
@@ -427,6 +481,7 @@ struct RootTabView: View {
                 moreSection("Body") {
                     MoreRow("Live", "waveform.path.ecg", .live)
                     MoreRow("Workouts", "figure.run", .workouts)
+                    MoreRow("Lift Log", "dumbbell.fill", .liftLog)
                     MoreRow("Health", "heart.text.square.fill", .health)
                     MoreRow("Lab Book", "books.vertical.fill", .labBook)
                     MoreRow("Stress", "bolt.heart.fill", .stress)
@@ -550,7 +605,7 @@ struct RootTabView: View {
 /// registration in `moreTab`.
 private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
-    case live, workouts, health, labBook, stress, breathe, intervals, rhythm
+    case live, workouts, liftLog, health, labBook, stress, breathe, intervals, rhythm
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport, noopLimitations
     case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
 
@@ -564,6 +619,7 @@ private enum MoreDestination: Hashable {
         case .compare:         CompareView()
         case .live:            LiveView()
         case .workouts:        WorkoutsView()
+        case .liftLog:         LiftLogView()
         case .health:          HealthView()
         case .labBook:         LabBookView()
         case .stress:          StressView()

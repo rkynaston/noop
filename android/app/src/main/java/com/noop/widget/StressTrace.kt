@@ -253,9 +253,8 @@ object StressTrace {
      * ROUNDING IS ARITHMETIC, NOT `printf`, for the reason `SleepStagerTrace.round1` gives: Java rounds
      * half up on the decimal expansion, C `printf` rounds half to even on the binary value, and a
      * harness caught those disagreeing on a real number. So the card's spelling is the one kept here,
-     * and iOS stays on `String(format:)`. A logistic squash lands within an ulp of a .x5 boundary about
-     * never, so the two cannot be shown to differ on a real level, but the arithmetic side is the one
-     * this codebase has already settled on.
+     * and iOS now performs the same tenths arithmetic. A logistic squash lands within an ulp of a .x5
+     * boundary about never, but sharing the rule means even exact synthetic values cannot diverge.
      *
      * Clamped to the domain, which the card did and the widget did not. `squash` should keep levels
      * inside it already, so this is belt-and-braces rather than load-bearing; what matters is that both

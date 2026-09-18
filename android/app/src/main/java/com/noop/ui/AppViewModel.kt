@@ -889,8 +889,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     // and the Buzz-WHOOP companion, arming the single slot to the earliest either wants (#5).
                     reconcileStrapAlarm()
                     // Remember this strap so we can reconnect to it directly on the next launch (#67),
-                    // e.g. after an APK update restarts the process.
-                    ble.lastDeviceAddress?.let { NoopPrefs.setLastDevice(appContext, it, _selectedModel.value) }
+                    // e.g. after an APK update restarts the process. The address and model must both
+                    // describe the link that actually bonded: scan fallback / easy-connect can establish
+                    // a different family from the picker, and saving the pick made the pair lie about its
+                    // own address, then fed that lie back into every direct reconnect (#2068).
+                    val establishedModel = ble.establishedModel
+                    val address = ble.lastDeviceAddress
+                    if (establishedModel != null && address != null) {
+                        NoopPrefs.setLastDevice(appContext, address, establishedModel)
+                    }
                 }
                 lastBonded = state.bonded
             }
@@ -1260,11 +1267,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                     .active(com.noop.testcentre.TestDomain.UNIVERSAL))
                                 { line -> ble.externalLog(line, com.noop.testcentre.TestDomain.UNIVERSAL) }
                             else null,
-                        // Workouts & GPS test mode (#975): when the WORKOUTS domain is on, route each detected-
-                        // bout persist/drop decision into the .workouts-tagged strap log so an "auto workout
-                        // appeared then vanished" is explainable from an export (previously the auto path
-                        // produced NO trace). Zero-cost when off: one SharedPreferences bool read and the sink
-                        // stays null, so the detected-bout persist path is byte-identical. Mirrors macOS.
+                        // Workouts & GPS test mode (#975/#2187): when the WORKOUTS domain is on, route each
+                        // analytics-only/backfill decision into the .workouts-tagged strap log. Zero-cost when
+                        // off: one SharedPreferences bool read and the sink stays null, so normal analytics are
+                        // byte-identical. Mirrors macOS.
                         workoutsTraceSink =
                             if (com.noop.testcentre.TestCentre.from(appContext)
                                     .active(com.noop.testcentre.TestDomain.WORKOUTS))
@@ -1692,6 +1698,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val endMs = System.currentTimeMillis()
+        // A session under a minute is a start/stop nobody meant to keep. Twin of Swift
+        // `AppModel.endWorkout`, and the same floor the manual doors enforce, so a workout is treated
+        // identically whether it was tracked or typed in. Discarded at SAVE rather than pruned later:
+        // nothing that ever held training data is removed.
+        val elapsedSeconds = (endMs - w.startMs) / 1000L
+        if (elapsedSeconds < WorkoutEditing.MIN_MANUAL_SPAN_SECONDS) {
+            emitWorkoutsTrace {
+                com.noop.analytics.WorkoutsTrace.sessionLine(
+                    event = "discarded", sportKey = WorkoutEditing.traceSportKey(w.sport.name),
+                    hrSamples = samples.size, durationSec = elapsedSeconds.toInt(),
+                    gpsPoints = if (w.gpsEnabled) track.size else null,
+                )
+            }
+            _lastWorkout.value = null
+            return
+        }
         val pausedMs = w.pausedDurationMs + (w.pausedAtMs?.let { endMs - it } ?: 0L)
         val activeDurationMs = (endMs - w.startMs - pausedMs).coerceAtLeast(0L)
         val avg = if (samples.isNotEmpty()) samples.sumOf { it.bpm } / samples.size else null
@@ -1780,8 +1802,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     //
     // The screen observes [workouts]; every mutation re-loads it so the list reflects the new state
     // immediately. Loads ALL sources — strap (imported + manual), Apple Health / Health Connect, and
-    // the on-device DETECTED bouts under "<deviceId>-noop" — then filters out dismissed detected bouts
-    // so a duplicate the auto-detector created is visible but removable. Mirrors macOS
+    // grandfathered DETECTED bouts under "<deviceId>-noop" — then filters out dismissed detected bouts
+    // so legacy history remains visible and removable. Mirrors macOS
     // Repository.workoutRows.
 
     private val _workouts = MutableStateFlow<List<WorkoutRow>>(emptyList())
@@ -1972,7 +1994,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             // HR-fill below like the imported Apple sessions — a GPX with no HR borrows the strap's, while a
             // FIT that already carries HR is untouched (fill only fills nulls).
             val activityFiles = repository.workouts(ActivityFileImporter.SOURCE_ID, 0L, now)
-            val markers = repository.dismissedDetected(deviceId)
+            val markers = repository.dismissedDetectedUnion(deviceId)
             // Fill imported sessions' missing HR from strap samples (#77), same as before; detected /
             // manual rows already carry their own HR so they pass through unchanged. #961: also backfill a
             // strap-native row's Effort (strain) from the strap trace when it's null, so a live/manual
@@ -2171,7 +2193,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Re-label a detected bout to [sport] (becomes a durable manual session), then reload. */
     fun relabelDetected(row: WorkoutRow, sport: String) {
         viewModelScope.launch {
-            runCatching { repository.relabelDetected(row, sport) }
+            runCatching { repository.relabelDetected(row, sport, deviceId) }
             loadWorkouts()
         }
     }

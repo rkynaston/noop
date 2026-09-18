@@ -27,6 +27,25 @@ final class StressTraceTests: XCTestCase {
         XCTAssertEqual(StressTrace.domainMax, 3.0)
     }
 
+    // MARK: - formatting
+
+    func testAStressLevelRoundsHalfAwayFromZeroLikeAndroid() {
+        XCTAssertEqual(StressTrace.formatLevel(0.25), "0.3")
+        XCTAssertEqual(StressTrace.formatLevel(1.25), "1.3")
+        XCTAssertEqual(StressTrace.formatLevel(2.25), "2.3")
+    }
+
+    func testAStressLevelRoundsToOneDecimal() {
+        XCTAssertEqual(StressTrace.formatLevel(1.85), "1.9")
+        XCTAssertEqual(StressTrace.formatLevel(1.96), "2.0")
+        XCTAssertEqual(StressTrace.formatLevel(0.04), "0.0")
+    }
+
+    func testAStressLevelIsClampedToTheDomainAtBothEnds() {
+        XCTAssertEqual(StressTrace.formatLevel(StressTrace.domainMax + 0.4), "3.0")
+        XCTAssertEqual(StressTrace.formatLevel(-1.0), "0.0")
+    }
+
     // MARK: - the fixed domain
 
     func testACalmDayIsDrawnLowRatherThanStretchedAcrossTheBox() {

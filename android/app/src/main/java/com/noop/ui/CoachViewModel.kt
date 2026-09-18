@@ -255,15 +255,22 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
      * the returned ids into [availableModels] (curated ids first, then any new live ids). Never
      * throws and never changes the current selection; a failure simply leaves the list as-is.
      */
-    fun refreshModels(ctx: Context) {
+    fun refreshModels(ctx: Context, silent: Boolean = false) {
         if (_refreshingModels.value) return
         val appCtx = ctx.applicationContext
         val p = _provider.value
         val url = _customBaseUrl.value
         // Clear before trying, not only on success. The setup card renders this now, so without it a
         // stale message from the previous attempt would sit under a refresh that has just succeeded.
-        _error.value = null
-        _keyRejected.value = false
+        //
+        // [silent] leaves the error surface entirely alone, in both directions. An automatic refresh
+        // must not wipe a message the user is still reading, and must not raise one they never asked
+        // for: they opened a settings screen, they did not ask this provider anything. Matches the
+        // save/restore the Swift twin does around `refreshModels()`.
+        if (!silent) {
+            _error.value = null
+            _keyRejected.value = false
+        }
         _refreshingModels.value = true
         viewModelScope.launch {
             try {
@@ -275,6 +282,15 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
                     if (p == AiProvider.CUSTOM && _model.value.isBlank() && merged.isNotEmpty()) {
                         selectModel(appCtx, merged.first())
                     }
+                    // Stamp only on a pull that actually returned something, so a provider that is
+                    // down does not buy itself a week of silence from [refreshModelsIfStale]. An empty
+                    // list is a failed pull in substance even though the call returned: a 200 with no
+                    // models is what a misconfigured proxy or a changed API looks like, and stamping it
+                    // would freeze the catalogue for a week with nothing to show for it. The Swift twin
+                    // reaches the same point through its `guard !ids.isEmpty`.
+                    if (live.isNotEmpty()) {
+                        NoopPrefs.setCoachModelsRefreshedAt(appCtx, p.name, System.currentTimeMillis())
+                    }
                 }
             } catch (e: Exception) {
                 // Best-effort about the LIST: whatever we already have stays. But a key the provider
@@ -282,7 +298,7 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
                 // simply did nothing. Refresh is one of the two places a wrong key shows itself, so it
                 // now says so and opens the field to fix it. Every other failure stays quiet, which is
                 // what "best-effort" was protecting. Mirrors the typed catch in Swift refreshModels.
-                if (e is AiKeyRejectedException) {
+                if (!silent && e is AiKeyRejectedException) {
                     _error.value = e.message
                     _keyRejected.value = true
                 }
@@ -290,6 +306,37 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
                 _refreshingModels.value = false
             }
         }
+    }
+
+    /**
+     * Pull the live catalogue at most once every [MODEL_REFRESH_INTERVAL_MS], so the picker offers what
+     * the provider sells today without this app shipping a build for every model release (#2255 had to
+     * hand-edit two lists to add one generation).
+     *
+     * Quiet about FAILURE: `silent` leaves the error surface untouched in both directions, so this
+     * neither wipes a message the user is reading nor raises one they never asked for. A failure leaves
+     * the built-in list in place, which is what they would have seen anyway, and the explicit Refresh
+     * control still reports properly for anyone who wants to know whether it worked.
+     *
+     * The refresh indicator DOES run while this is in flight: `_refreshingModels` is the re-entrancy
+     * guard as well as the spinner, so suppressing it would let a manual tap race this one for the
+     * model list. A briefly spinning control on a screen the user just opened is honest about what the
+     * app is doing; a banner about a provider they did not address is not.
+     *
+     * Requires a stored key, so it cannot fire during first-run setup where there is nothing to
+     * authenticate with. Custom is excluded: [connectCustom] already pulls its list on connect, and its
+     * server is the user's own machine rather than a vendor catalogue.
+     *
+     * Only the LIST moves. The selected model is never changed underneath the user: a new generation
+     * appears in the picker, it does not silently become what answers their questions.
+     */
+    fun refreshModelsIfStale(ctx: Context) {
+        val appCtx = ctx.applicationContext
+        val p = _provider.value
+        if (p == AiProvider.CUSTOM || !hasKey(appCtx)) return
+        val last = NoopPrefs.coachModelsRefreshedAt(appCtx, p.name)
+        if (!isCatalogueStale(last, System.currentTimeMillis())) return
+        refreshModels(appCtx, silent = true)
     }
 
     /**
@@ -392,6 +439,17 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
         val question = text.trim()
         if (question.isEmpty() || _sending.value) return
 
+        // The master switch, checked at the EGRESS rather than only on the routes in. Every way into this
+        // screen is gated, but "gated everywhere I thought of" is what #2254 already got wrong once: a
+        // revoked consent survived in memory because the conversation itself never re-read it. A wearer
+        // can be STANDING on this screen when the switch goes off, or come back to it through the
+        // navigation stack, and neither path passes the tab again. Refusing here makes "the AI is off"
+        // true however the screen was reached.
+        //
+        // Before any state is touched, so there is no placeholder turn to unwind and the typed question
+        // stays in the composer.
+        if (!NoopPrefs.coachEnabled(ctx.applicationContext)) return
+
         // A transcript from an earlier local day is retired before the new turn is appended. The
         // ViewModel outlives a night (Android keeps the process around for days), so without this the
         // coach answers TODAY's question inside YESTERDAY's conversation: buildContext() re-reads the
@@ -418,15 +476,21 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
 
         viewModelScope.launch {
             try {
+                // Re-read the stored grant rather than trusting the copy this instance was built
+                // with. Consent is editable from CoachSettingsScreen, and the system prompt already
+                // works this way (`resolveSystemPrompt` is read fresh per send); a revoked grant
+                // must not be able to survive in memory on the one call that egresses data.
+                val consentNow = AiKeyStore.readConsent(appCtx)
+                _consent.value = consentNow
                 aiCoach.chatStream(
                     ctx = appCtx,
                     history = _messages.value.dropLast(1), // exclude the placeholder
                     provider = _provider.value,
                     model = _model.value,
-                    consent = _consent.value,
+                    consent = consentNow,
                     customBaseUrl = _customBaseUrl.value,
                     customAuthHeader = _customAuthHeader.value,
-                    includeSignals = _consent.value && NoopPrefs.coachSignals(appCtx),
+                    includeSignals = consentNow && NoopPrefs.coachSignals(appCtx),
                 ) { delta ->
                     accumulated += delta
                     // Replace the placeholder's text with the accumulated stream so far.
@@ -634,6 +698,25 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
          * what's sent. (parity with Swift `maxStoredMessages`)
          */
         private const val MAX_STORED_MESSAGES = 40
+
+        /** How long a pulled model catalogue is trusted before [refreshModelsIfStale] pulls again. */
+        internal const val MODEL_REFRESH_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000
+
+        /**
+         * Whether a catalogue last pulled at [lastMillis] is due another pull at [nowMillis].
+         *
+         * Pure, and deliberately a companion function rather than logic buried in
+         * [refreshModelsIfStale]: CoachViewModel needs an Application, so nothing that lives on the
+         * instance can be pinned by a JVM test. [isStaleConversation] is split out for the same reason
+         * and tested the same way.
+         *
+         * A never-pulled catalogue (0) is stale, so the first visit fetches. A clock that has moved
+         * BACKWARDS yields a negative age and is treated as fresh, which keeps the cached list rather
+         * than refetching on every visit until the clock catches up. That matches the direction
+         * [isStaleConversation] chose for the same situation.
+         */
+        internal fun isCatalogueStale(lastMillis: Long, nowMillis: Long): Boolean =
+            nowMillis - lastMillis >= MODEL_REFRESH_INTERVAL_MS
 
         /**
          * The LOCAL epoch day an epoch-SECONDS instant falls on: the same value

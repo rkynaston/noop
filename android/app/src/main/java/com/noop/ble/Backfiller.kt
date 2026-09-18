@@ -842,8 +842,8 @@ class Backfiller(
             fill = sessionRrFill.toList(),
         )
         return com.noop.analytics.RrEmissionStats.historicalAuthorityLine(
-            sessionRrOffered, sessionRrOffered, sessionRrInserted, 0, r,
-        )
+            received = sessionRrOffered, accepted = sessionRrOffered,
+            persisted = sessionRrInserted, rejected = 0, r = r)
     }
 
     companion object {

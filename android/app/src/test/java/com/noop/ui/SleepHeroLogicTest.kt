@@ -1,5 +1,6 @@
 package com.noop.ui
 
+import com.noop.data.DailyMetric
 import com.noop.data.SleepSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -196,9 +197,137 @@ class SleepHeroLogicTest {
         val browsed = navHeaderClockLabel(null, nav, offset = 1, is24h = true)
         assertNotNull(browsed)
         assertNotEquals("a stage-less night must not borrow the newest night's date", newest, browsed)
-        // The window is (min effectiveStartTs, max endTs), so the date shown is the ONSET day: a 07:00
-        // wake on the 12th was an 01:00 onset the same day in UTC.
-        assertTrue("expected the browsed night's own date, got $browsed", browsed!!.startsWith("Wed 12 Aug"))
+        // These fixtures wake at 07:00 from an 01:00 onset the SAME day, which is the after-midnight
+        // shape #2199 turned on. The date is now the night's wake day minus one, so a night waking on
+        // the 12th is named the 11th. Repinned rather than deleted: the invariant this test exists for
+        // is the one above, that a stage-less night does not borrow the newest night's date (#2201),
+        // and it still holds because distinct rows still get distinct dates.
+        assertTrue("expected the browsed night's own date, got $browsed", browsed!!.startsWith("Tue 11 Aug"))
+    }
+
+    /**
+     * A night that BEGINS after midnight: onset and wake land on the same calendar date. Sleeping
+     * from 00:30 to 07:00 is an ordinary night, and #2199 is the row it produces.
+     */
+    private fun afterMidnightNight(wakeDate: LocalDate): List<SleepSession> {
+        val onset = wakeDate.atStartOfDay(ZoneOffset.UTC).plusMinutes(30).toEpochSecond()
+        val wake = wakeDate.atStartOfDay(ZoneOffset.UTC).plusHours(7).toEpochSecond()
+        return listOf(SleepSession(deviceId = "d", startTs = onset, endTs = wake))
+    }
+
+    /** A night that really crosses midnight: onset 22:50 on [onsetDate], wake 06:48 the next morning. */
+    private fun crossMidnightNight(onsetDate: LocalDate): List<SleepSession> {
+        val onset = onsetDate.atStartOfDay(ZoneOffset.UTC).plusHours(22).plusMinutes(50).toEpochSecond()
+        val wake = onsetDate.plusDays(1).atStartOfDay(ZoneOffset.UTC).plusHours(6).plusMinutes(48).toEpochSecond()
+        return listOf(SleepSession(deviceId = "d", startTs = onset, endTs = wake))
+    }
+
+    /**
+     * #2199 as reported: three consecutive rows, typed off the reporter's own screen. These fixtures
+     * cross midnight, which [nightOn] above deliberately does not - its 01:00 onset shares a calendar
+     * day with its 07:00 wake, so onset and wake answer every anchor question identically. That is
+     * precisely why the existing suite could not have caught this pairing.
+     *
+     * The two lines are computed from opposite ends of the night: the relative label counts from the
+     * WAKE day ([calendarNightsAgo], the key navDays groups by), the date beneath it prints the ONSET
+     * day ([clockLabelFor]). For a real night those are different calendar days, so the pairing only
+     * reads correctly if each row resolves its OWN night. The reporter's "to be" table is pinned
+     * verbatim, and the hero label is passed as null so this walks the stage-less path - the one that
+     * used to borrow the newest night's date and print it under a correctly-counted row.
+     */
+
+    /**
+     * #2199, third report. The carousel groups by `localDayString(endTs)`, so each row IS one wake
+     * date and the rows are unique by construction. The date printed beside them came from the
+     * ONSET, and a night beginning after midnight has an onset on its own wake date. Two adjacent
+     * rows then print the same date while counting correctly, which is what @bartmuskala saw twice:
+     *
+     *     Last night      Mon 14 Sep
+     *     1 night ago     Sun 13 Sep
+     *     2 nights ago    Sun 13 Sep   <- the after-midnight row repeating the one above
+     *     3 nights ago    Sat 12 Sep
+     *
+     * This is NOT the borrowed-date defect that #2201 fixed; that one is gone and this survived it.
+     * The earlier `nightCaptionPairsEachLabelWithItsOwnOnsetDate_issue2199` fixture could not catch
+     * it, because every night there crosses midnight and so has a distinct onset date.
+     *
+     * Naming a row by its own wake date minus one day makes it agree with the key the row is
+     * selected by, which is what "keep the logic from start to end" asks for, and it cannot repeat.
+     */
+
+    /**
+     * `clockLabel` fills ONE slot from two branches: the session when the night decoded, the daily
+     * metric's day key when it did not. They must name the night identically, or the same night reads
+     * a day apart depending on whether its stages happened to decode. That is the two-paths-one-night
+     * shape of #2201, and it survived into the #2199 anchor until both ends were moved together.
+     */
+    @Test
+    fun clockLabelNamesTheSameNightFromEitherBranch_issue2199() {
+        val wakeDay = LocalDate.of(2026, 9, 13)                 // an after-midnight night: 00:30 - 07:00
+        val session = afterMidnightNight(wakeDay).first()
+        val metric = DailyMetric(deviceId = "d", day = wakeDay.toString())
+
+        val fromSession = clockLabel(metric, session, is24h = true)
+        val fromDayKey = clockLabel(metric, null, is24h = true)
+
+        assertTrue(
+            "session branch printed $fromSession, expected it to name Sat 12 Sep",
+            fromSession.startsWith("Sat 12 Sep"),
+        )
+        assertEquals(
+            "the same night must not read a day apart depending on whether its stages decoded",
+            fromSession.substringBefore(" \u00b7"), fromDayKey.substringBefore(" \u00b7"),
+        )
+    }
+
+    @Test
+    fun afterMidnightNightDoesNotRepeatTheDateAboveIt_issue2199() {
+        val utc = TimeZone.getTimeZone("UTC")
+        val today = LocalDate.of(2026, 9, 15)   // a Tuesday, matching the reported table
+        val nav = listOf(
+            crossMidnightNight(LocalDate.of(2026, 9, 14)),   // onset Mon 14 -> wake Tue 15
+            crossMidnightNight(LocalDate.of(2026, 9, 13)),   // onset Sun 13 -> wake Mon 14
+            afterMidnightNight(LocalDate.of(2026, 9, 13)),   // onset AND wake Sun 13
+            afterMidnightNight(LocalDate.of(2026, 9, 12)),   // onset AND wake Sat 12
+        )
+        val expected = listOf(
+            "Last night" to "Mon 14 Sep",
+            "1 night ago" to "Sun 13 Sep",
+            "2 nights ago" to "Sat 12 Sep",
+            "3 nights ago" to "Fri 11 Sep",
+        )
+        val seen = mutableMapOf<String, String>()
+        expected.forEachIndexed { offset, (label, date) ->
+            assertEquals(label, nightRelativeLabel(calendarNightsAgo(nav, offset, utc, today)))
+            val clock = navHeaderClockLabel(null, nav, offset, is24h = true)
+            assertNotNull("row \"$label\" had no date at all", clock)
+            assertTrue("row \"$label\" printed $clock, expected it to start $date", clock!!.startsWith(date))
+            val printed = clock.substringBefore(" \u00b7")
+            val owner = seen.put(printed, label)
+            assertNull("rows \"$owner\" and \"$label\" both print $printed", owner)
+        }
+    }
+
+    @Test
+    fun nightCaptionPairsEachLabelWithItsOwnOnsetDate_issue2199() {
+        val utc = TimeZone.getTimeZone("UTC")
+        val today = LocalDate.of(2026, 9, 14)   // a Monday, so last night is Sunday the 13th
+        val nav = listOf(
+            crossMidnightNight(LocalDate.of(2026, 9, 13)),   // onset Sun 13 -> wake Mon 14
+            crossMidnightNight(LocalDate.of(2026, 9, 12)),   // onset Sat 12 -> wake Sun 13
+            crossMidnightNight(LocalDate.of(2026, 9, 11)),   // onset Fri 11 -> wake Sat 12
+        )
+        val expected = listOf(
+            "Last night" to "Sun 13 Sep",
+            "1 night ago" to "Sat 12 Sep",
+            "2 nights ago" to "Fri 11 Sep",
+        )
+        expected.forEachIndexed { offset, (label, date) ->
+            assertEquals(label, nightRelativeLabel(calendarNightsAgo(nav, offset, utc, today)))
+            val clock = navHeaderClockLabel(null, nav, offset, is24h = true)
+            assertNotNull("row \"$label\" had no date at all", clock)
+            assertTrue("row \"$label\" printed $clock, expected it to start $date", clock!!.startsWith(date))
+        }
     }
 
     /** An offset past the end of navDays has no night to date, so the header shows nothing at all. */

@@ -94,6 +94,17 @@ public enum StressTrace {
                      movingHours: series.filter(\.moving).count)
     }
 
+    /// Prints a stress level to one decimal using the same arithmetic as Android.
+    ///
+    /// `String(format: "%.1f")` rounds exact halves to even, while Kotlin's `roundToInt` rounds
+    /// them away from zero. Building the tenths explicitly keeps values such as 0.25, 1.25 and 2.25
+    /// identical on both platforms, and also keeps the decimal separator independent of locale.
+    public static func formatLevel(_ value: Double) -> String {
+        let domainTenths = Int((domainMax * 10).rounded(.toNearestOrAwayFromZero))
+        let tenths = min(max(Int((value * 10).rounded(.toNearestOrAwayFromZero)), 0), domainTenths)
+        return "\(tenths / 10).\(tenths % 10)"
+    }
+
     /// The one placement rule, shared so a dot and its vertex cannot land apart.
     private static func place(ts: Int64, level: Double, t0: Int64, span: CGFloat,
                               width: CGFloat, height: CGFloat) -> Pt {

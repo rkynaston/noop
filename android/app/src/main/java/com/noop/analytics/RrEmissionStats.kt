@@ -170,8 +170,9 @@ object RrEmissionStats {
             "fill[<=1/<=1.5/<=2/>2]=${r.fill[0]}/${r.fill[1]}/${r.fill[2]}/${r.fill[3]}"
     }
 
-    /** Fresh historical-only authority diagnostic; never reads legacy rows from the database. */
-    fun historicalAuthorityLine(received: Int, accepted: Int, persisted: Int, rejected: Int, r: Result): String {
+    /** Fresh decoded offload authority, unaffected by legacy rows already in the database. */
+    fun historicalAuthorityLine(received: Int, accepted: Int, persisted: Int,
+                                rejected: Int, r: Result): String {
         val status = if (r.ratio in 0.90..1.10) "ok" else "warning"
         val largestBucket = r.gapHist.indexOfLast { it > 0 } + 1
         val largestGap = if (largestBucket == 8) "8+s" else "${largestBucket}s"
@@ -179,4 +180,5 @@ object RrEmissionStats {
             "rejected=$rejected mode=authority coverage=$status largestGap=$largestGap " +
             logLine("historical", accepted, persisted, r)
     }
+
 }

@@ -224,10 +224,49 @@ class CallSite:
     lexical_owner: str | None = None
 
 
+# Directories that hold BUILD OUTPUT rather than source. Every glob here ends in `**`, and `**`
+# descends into these exactly as happily as into a source tree: a dependency checked out under
+# `Packages/StrandAnalytics/.build/checkouts/...` matches `Packages/**/Sources/**/*.swift` whenever the
+# dependency happens to lay itself out with a `Sources` directory, which SwiftPM packages do by
+# convention.
+#
+# Left unfiltered this is worse than noise, because the pollution is SUBTRACTIVE. It does not add
+# findings a reader would question; it REMOVES them, by handing a declaration a callsite that only
+# exists in a vendored copy of somebody else's library. That is how a scan on a working tree came back
+# one `test-only-callsite` short for Packages/StrandAnalytics, against a baseline derived on a clean
+# checkout, and the local acceptance test passed anyway because both sides of its comparison came from
+# the same polluted tree. CI checks out clean, so it never saw any of it and could not warn.
+#
+# Filtering here rather than in each glob because `_paths` is the ONLY place this module globs: the
+# declaration scan, the reference scan and both callsite corpora all come through it.
+#
+# The invariant that makes this safe is checked by a test rather than asserted here: everything this
+# drops is untracked by git, so no file the repository actually contains can be hidden by it.
+_ARTEFACT_DIRS = frozenset({
+    ".build",        # SwiftPM: checkouts, index-build, the lot
+    ".swiftpm",
+    "DerivedData",   # Xcode
+    "build",         # Gradle output, incl. anything KSP or the AGP generates
+    ".gradle",
+    "node_modules",
+    "Pods",          # CocoaPods, if it ever appears
+})
+
+
+def _is_build_artefact(root: Path, path: Path) -> bool:
+    """True when `path` sits inside a build-output directory rather than the source tree."""
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        parts = path.parts
+    return any(part in _ARTEFACT_DIRS for part in parts)
+
+
 def _paths(root: Path, globs: Iterable[str]) -> list[Path]:
     found: set[Path] = set()
     for pattern in globs:
-        found.update(path for path in root.glob(pattern) if path.is_file())
+        found.update(path for path in root.glob(pattern)
+                     if path.is_file() and not _is_build_artefact(root, path))
     return sorted(found)
 
 
@@ -494,7 +533,7 @@ def _mask_kotlin_template_code(text: str) -> str:
     return "".join(out)
 
 
-def _arity(masked: str, opening: int) -> int | None:
+def _arity(masked: str, opening: int, *, angles_are_brackets: bool = True) -> int | None:
     stack: list[str] = []
     pairs = {")": "(", "]": "[", "}": "{", ">": "<"}
     segments = 0
@@ -506,7 +545,17 @@ def _arity(masked: str, opening: int) -> int | None:
             stack.append(char)
         elif char == "<":
             # Parameter lists use angle brackets for types. Do not treat Kotlin/Swift arrows as generics.
-            if i + 1 >= len(masked) or masked[i + 1] not in "= ":
+            #
+            # Nor Swift's half-open range operator. `a[x..<y]` ends in a `<` whose next character is the
+            # start of the upper bound, so the arrow guard below lets it through and pushes a bracket that
+            # nothing ever closes; the walk then runs to the end of the file and returns None, and the
+            # CALLER SILENTLY DISAPPEARS (`if arity is None: continue`). That is how
+            # Interpreter.hexString/1 came to have "no production callsite" while being called on the very
+            # next line of its own file: its one call passes `frame[max(0, off)..<max(off, end)]`.
+            # A declaration whose only real call is invisible then reports as test-only the moment any
+            # test-local helper of the same name lends it a callsite (#2257).
+            is_half_open_range = masked[max(0, i - 2) : i] == ".."
+            if angles_are_brackets and not is_half_open_range and (i + 1 >= len(masked) or masked[i + 1] not in "= "):
                 stack.append(char)
         elif char in pairs:
             if char == ")" and not stack:
@@ -520,6 +569,28 @@ def _arity(masked: str, opening: int) -> int | None:
         elif not char.isspace() and not stack:
             segment_has_token = True
         i += 1
+
+    # The walk never balanced, which means some `<` was pushed that nothing closed. Falling out of
+    # here returns None, and every caller answers None with `continue` -- so an argument this walk
+    # cannot parse does not merely lose its arity, it ERASES THE ENTIRE CALLSITE and the scan reports
+    # a declaration nobody calls.
+    #
+    # `<` is the only genuinely ambiguous character: a generic argument list needs it treated as a
+    # bracket, while `a << b`, `a<b` and friends need it treated as an operator, and no lexical rule
+    # separates the two. Guarding one spelling at a time does not converge -- exempting `..<` above
+    # still leaves every shift expression erased. So resolve the ambiguity by OUTCOME rather than by
+    # guesswork. Retry with angle brackets demoted to ordinary characters; if that balances, it was
+    # an operator.
+    #
+    # Measured on this repository, the two walks together recover 418 callsites the strict walk alone
+    # erases: 377 spelled `..<`, 35 spelled `<<`, and a residue of other `<` uses. Declaration arities
+    # are unaffected (0 of them change), so no declaration can enter the inventory because of this.
+    #
+    # This can only add information. A call that already balanced returned above and never reaches
+    # the retry, so no successful parse changes. Only calls that currently contribute NOTHING can
+    # move, and they can only move from invisible to visible.
+    if angles_are_brackets:
+        return _arity(masked, opening, angles_are_brackets=False)
     return None
 
 
@@ -827,10 +898,11 @@ class _NumberExpression:
         token = self._take()
         if not NUMBER_TOKEN.fullmatch(token):
             raise InvalidOperation
-        number = token.replace("_", "").rstrip("fFdDlL")
+        number = token.replace("_", "")
         if number.lower().startswith(("0x", "0b", "0o")):
-            return Decimal(int(number, 0))
-        return Decimal(number)
+            # f/F/d/D are hex digits here; radix literals only take the l/L suffix.
+            return Decimal(int(number.rstrip("lL"), 0))
+        return Decimal(number.rstrip("fFdDlL"))
 
     def _peek(self) -> str | None:
         return self.tokens[self.index] if self.index < len(self.tokens) else None
@@ -2620,7 +2692,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bootstrap-map", action="store_true", help="write a fresh inventory map before scanning")
     parser.add_argument("--write-baseline", action="store_true", help="rewrite the baseline with current findings")
     parser.add_argument("--refresh-derived", action="store_true", help="refresh existing derived snapshots only if the ratchet accepts the result")
+    parser.add_argument(
+        "--repair-stale-base",
+        action="store_true",
+        help="with --refresh-derived, repair metadata drift already present in the exact base",
+    )
     parser.add_argument("--base", default="origin/main", help="exact git ref used to prove debt reductions")
+    parser.add_argument(
+        "--migrate-authority",
+        action="store_true",
+        help="re-base onto a freshly derived base authority when the base's stored one cannot be "
+             "reproduced; new debt still requires issue-bound dispositions",
+    )
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
@@ -2628,6 +2711,15 @@ def main(argv: list[str] | None = None) -> int:
     baseline_path = args.baseline_path or root / "Tools/parity_ledger_baseline.json"
     if args.bootstrap_map != args.write_baseline:
         print("FAIL --bootstrap-map and --write-baseline must be used together")
+        return 2
+    if args.repair_stale_base and not args.refresh_derived:
+        print("FAIL --repair-stale-base requires --refresh-derived")
+        return 2
+    if args.migrate_authority and not args.refresh_derived:
+        print("FAIL --migrate-authority requires --refresh-derived")
+        return 2
+    if args.migrate_authority and args.repair_stale_base:
+        print("FAIL --repair-stale-base and --migrate-authority are different remedies; use one")
         return 2
     if args.refresh_derived:
         if args.bootstrap_map or args.write_baseline or args.no_baseline:
@@ -2654,6 +2746,10 @@ def main(argv: list[str] | None = None) -> int:
                 sys.executable, str(Path(__file__).with_name("parity_ratchet.py")),
                 "--root", str(root), "--base", args.base, "--offline",
             ]
+            if args.repair_stale_base:
+                command.append("--repair-stale-base")
+            if args.migrate_authority:
+                command.append("--migrate-authority")
             completed = subprocess.run(command, cwd=root, text=True, capture_output=True)
             if completed.returncode:
                 print("FAIL derived refresh rejected; snapshots restored")

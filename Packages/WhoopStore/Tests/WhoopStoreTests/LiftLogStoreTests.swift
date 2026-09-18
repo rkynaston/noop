@@ -82,6 +82,109 @@ final class LiftLogStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Targets and the session rating, stored as numbers
+
+    func testTargetWeightRoundTripsOnAProgramLine() async throws {
+        let store = try await WhoopStore.inMemory()
+        let programId = UUID().uuidString
+        let item = LiftProgramItemRow(
+            id: UUID().uuidString, deviceId: "dev", programId: programId, ord: 0,
+            exercise: "Back squat", targetSets: 5, targetRepsLow: 5, targetRepsHigh: nil,
+            targetRpe: nil, targetWeightKg: 102.5, restSec: 180, note: nil)
+        _ = try await store.replaceLiftProgramItems(programId: programId, items: [item])
+
+        let back = try await store.liftProgramItems(programId: programId)
+        XCTAssertEqual(back.count, 1)
+        XCTAssertEqual(back[0].targetWeightKg, 102.5)
+        XCTAssertEqual(back[0].targetRepsLow, 5)
+    }
+
+    func testSessionRpeRoundTripsAsANumber() async throws {
+        let store = try await WhoopStore.inMemory()
+        let row = LiftSessionRow(
+            id: UUID().uuidString, deviceId: "dev", startTs: 1_700_000_000, endTs: 1_700_003_600,
+            sport: "Strength Training", programId: nil, programName: "Upper A",
+            sessionRpe: 7.5, note: nil)
+        _ = try await store.upsertLiftSessions([row])
+
+        let back = try await store.liftSessions(deviceId: "dev", fromTs: 1_700_000_000,
+                                                toTs: 1_700_000_000).first
+        XCTAssertEqual(back?.sessionRpe, 7.5)
+    }
+
+    func testSessionRpeIsOptionalSoASkippedRatingIsNotAZero() async throws {
+        let store = try await WhoopStore.inMemory()
+        let row = LiftSessionRow(
+            id: UUID().uuidString, deviceId: "dev", startTs: 1_700_000_500, endTs: nil,
+            sport: "Strength Training", programId: nil, programName: nil,
+            sessionRpe: nil, note: nil)
+        _ = try await store.upsertLiftSessions([row])
+
+        let back = try await store.liftSessions(deviceId: "dev", fromTs: 1_700_000_500,
+                                                toTs: 1_700_000_500).first
+        XCTAssertNil(back?.sessionRpe,
+                     "a skipped rating must stay nil — a 0 would read as 'effortless' and corrupt the load")
+    }
+
+    // MARK: - The vocabulary cap
+
+    func testAnExistingExerciseAlwaysUpdatesEvenAtTheCap() async throws {
+        let store = try await WhoopStore.inMemory()
+        let row = LiftExerciseRow(id: UUID().uuidString, deviceId: "dev", name: "Bench press",
+                                  primaryMuscle: .chest, secondaryMuscles: [],
+                                  createdAt: 1_700_000_000, lastUsedTs: nil)
+        _ = try await store.upsertLiftExercises([row])
+        // Re-saving a KNOWN name is an update, not a new entry — it must never be refused, or a user
+        // at the cap could no longer fix the classification of something they train weekly.
+        var reclassified = row
+        reclassified.primaryMuscle = .triceps
+        _ = try await store.upsertLiftExercises([reclassified])
+
+        let back = try await store.liftExercises(deviceId: "dev")
+        XCTAssertEqual(back.count, 1)
+        XCTAssertEqual(back[0].primaryMuscle, .triceps)
+    }
+
+    func testANewExerciseIsRefusedOnceTheVocabularyIsFull() async throws {
+        let store = try await WhoopStore.inMemory()
+        let limit = WhoopStore.maxRememberedExercises
+        let rows = (0..<limit).map {
+            LiftExerciseRow(id: UUID().uuidString, deviceId: "dev", name: "Exercise \($0)",
+                            primaryMuscle: nil, secondaryMuscles: [],
+                            createdAt: 1_700_000_000, lastUsedTs: nil)
+        }
+        _ = try await store.upsertLiftExercises(rows)
+
+        let overflow = LiftExerciseRow(id: UUID().uuidString, deviceId: "dev", name: "One too many",
+                                       primaryMuscle: nil, secondaryMuscles: [],
+                                       createdAt: 1_700_000_000, lastUsedTs: nil)
+        do {
+            _ = try await store.upsertLiftExercises([overflow])
+            XCTFail("a new name past the cap should be refused, not silently dropped")
+        } catch let error as WhoopStore.LiftExerciseVocabularyFull {
+            XCTAssertEqual(error.limit, limit, "the message must be able to name the limit")
+        }
+        // And nothing already remembered was evicted to make room.
+        let back = try await store.liftExercises(deviceId: "dev")
+        XCTAssertEqual(back.count, limit)
+    }
+
+    func testTheCapIsPerDeviceNotGlobal() async throws {
+        let store = try await WhoopStore.inMemory()
+        _ = try await store.upsertLiftExercises([
+            LiftExerciseRow(id: UUID().uuidString, deviceId: "dev-a", name: "Row",
+                            primaryMuscle: nil, secondaryMuscles: [],
+                            createdAt: 1, lastUsedTs: nil)])
+        _ = try await store.upsertLiftExercises([
+            LiftExerciseRow(id: UUID().uuidString, deviceId: "dev-b", name: "Row",
+                            primaryMuscle: nil, secondaryMuscles: [],
+                            createdAt: 1, lastUsedTs: nil)])
+        let a = try await store.liftExercises(deviceId: "dev-a")
+        let b = try await store.liftExercises(deviceId: "dev-b")
+        XCTAssertEqual(a.count, 1)
+        XCTAssertEqual(b.count, 1)
+    }
+
     // MARK: - The user's own exercise vocabulary
 
     /// Anything the user types becomes an exercise they can reuse, with the muscle group they gave
@@ -305,18 +408,6 @@ final class LiftLogStoreTests: XCTestCase {
         XCTAssertTrue(never.isEmpty, "an exercise never logged has no history, and that is not an error")
     }
 
-    func testLoggedExercisesAreDistinctAndSorted() async throws {
-        let store = try await WhoopStore.inMemory()
-        _ = try await store.upsertLiftSessions([mkSession(id: "s1", startTs: 1_000)])
-        _ = try await store.upsertLiftSets([
-            mkSet(id: "a", sessionId: "s1", ord: 0, setIndex: 1, exercise: "Leg Press"),
-            mkSet(id: "b", sessionId: "s1", ord: 1, setIndex: 2, exercise: "Leg Press"),
-            mkSet(id: "c", sessionId: "s1", ord: 2, setIndex: 1, exercise: "Dead Bug"),
-        ])
-        let logged = try await store.liftExercisesLogged(deviceId: dev)
-        XCTAssertEqual(logged, ["Dead Bug", "Leg Press"])
-    }
-
     // MARK: - Muscle classification
 
     /// The token set is a stored-data contract: renaming a case would orphan every row written
@@ -438,34 +529,6 @@ final class LiftLogStoreTests: XCTestCase {
 
     // MARK: - Proximity to failure, reported separately
 
-    /// An unrated set is neither counted as hard nor assumed easy — it is reported as unrated, and
-    /// left out of the mean. Guessing in either direction would be inventing data.
-    func testRpeProfileSeparatesRatedFromUnrated() async throws {
-        let store = try await WhoopStore.inMemory()
-        _ = try await store.upsertLiftSessions([mkSession(id: "s1", startTs: 1_000)])
-        _ = try await store.upsertLiftSets([
-            mkSet(id: "a", sessionId: "s1", ord: 0, setIndex: 1, rpe: 6),
-            mkSet(id: "b", sessionId: "s1", ord: 1, setIndex: 2, rpe: 8),
-            mkSet(id: "c", sessionId: "s1", ord: 2, setIndex: 3, rpe: nil),
-            mkSet(id: "warm", sessionId: "s1", ord: 3, setIndex: 4, rpe: 9, isWarmup: true),
-        ])
-        let profile = try await store.liftRpeProfile(deviceId: dev, fromTs: 0, toTs: 9_999)
-        XCTAssertEqual(profile.workingSets, 3, "the warm-up is not a working set")
-        XCTAssertEqual(profile.rated, 2)
-        XCTAssertEqual(profile.unrated, 1)
-        XCTAssertEqual(profile.meanRpe ?? 0, 7.0, accuracy: 0.0001)
-        XCTAssertEqual(profile.atOrAboveThreshold, 1)
-    }
-
-    func testRpeProfileWithNothingRatedHasNoMean() async throws {
-        let store = try await WhoopStore.inMemory()
-        _ = try await store.upsertLiftSessions([mkSession(id: "s1", startTs: 1_000)])
-        _ = try await store.upsertLiftSets([mkSet(id: "a", sessionId: "s1", ord: 0, setIndex: 1, rpe: nil)])
-        let profile = try await store.liftRpeProfile(deviceId: dev, fromTs: 0, toTs: 9_999)
-        XCTAssertNil(profile.meanRpe, "no ratings means no average, not zero")
-        XCTAssertEqual(profile.unrated, 1)
-    }
-
     // MARK: - Privacy: delete-means-gone
 
     /// Every lift table is deviceId-keyed and listed in `deviceScopedTables`, so forgetting a device
@@ -494,13 +557,14 @@ final class LiftLogStoreTests: XCTestCase {
         LiftProgramItemRow(id: id, deviceId: dev, programId: programId, ord: ord,
                            exercise: exercise, targetSets: 3,
                            targetRepsLow: 8, targetRepsHigh: 10, targetRpe: 7.5,
+                           targetWeightKg: nil,
                            restSec: 180, note: "Lower slowly.")
     }
 
     private func mkSession(id: String, startTs: Int, endTs: Int? = nil,
                            programId: String? = "p1") -> LiftSessionRow {
         LiftSessionRow(id: id, deviceId: dev, startTs: startTs, endTs: endTs, sport: sport,
-                       programId: programId, programName: "Upper A", note: nil)
+                       programId: programId, programName: "Upper A", sessionRpe: nil, note: nil)
     }
 
     private func mkSet(id: String, sessionId: String, ord: Int, setIndex: Int,

@@ -121,7 +121,7 @@ enum AICoachError: LocalizedError {
     case noKey
     case emptyQuestion
     case badKey
-    case rateLimited
+    case rateLimited(String)
     case server(Int, String)
     case network(String)
     case decode
@@ -141,8 +141,9 @@ enum AICoachError: LocalizedError {
             return "Type a question for the coach."
         case .badKey:
             return "That API key was rejected. Check the key and the provider you selected."
-        case .rateLimited:
-            return "The provider is rate-limiting requests right now. Wait a moment and try again."
+        case .rateLimited(let detail):
+            let extra = detail.isEmpty ? "" : " (\(detail))"
+            return "The provider is rate-limiting requests right now. Wait a moment and try again.\(extra)"
         case .server(let code, let detail):
             let extra = detail.isEmpty ? "" : " - \(detail)"
             return "The provider returned an error (\(code))\(extra)."
@@ -525,12 +526,57 @@ final class AICoachEngine: ObservableObject {
     /// Best-effort: GET the chosen provider's models endpoint with the saved key and merge the
     /// returned ids into `availableModels`. Never crashes; failures land in `errorText` and leave
     /// the existing list intact. Requires a saved key.
-    func refreshModels() async {
+    /// When the live catalogue was last pulled for `provider`, keyed per provider so switching does
+    /// not hide one provider's stale list behind another's refresh. Kotlin twin:
+    /// `NoopPrefs.coachModelsRefreshedAt`.
+    static func modelsRefreshedKey(_ provider: AIProvider) -> String {
+        "ai.modelsRefreshed.\(provider.rawValue)"
+    }
+
+    /// How long a pulled catalogue is trusted. Kotlin twin: `MODEL_REFRESH_INTERVAL_MS`.
+    static let modelRefreshInterval: TimeInterval = 7 * 24 * 60 * 60
+
+    /// Whether a catalogue last pulled at `last` is due another pull at `now`.
+    ///
+    /// Split out and `static` so the rule can be pinned without an engine: it decides how often the app
+    /// talks to a provider unasked. A never-pulled catalogue (0) is stale, so the first visit fetches. A
+    /// clock moved BACKWARDS gives a negative age and reads as fresh, keeping the cached list rather
+    /// than refetching every visit until the clock catches up. Kotlin twin:
+    /// `CoachViewModel.isCatalogueStale`.
+    static func isCatalogueStale(last: TimeInterval, now: TimeInterval) -> Bool {
+        now - last >= modelRefreshInterval
+    }
+
+    /// Pull the live catalogue at most once a week, so the picker offers what the provider sells today
+    /// without this app shipping a build for every model release.
+    ///
+    /// Quiet about FAILURE: it passes `silent`, so `refreshModels` leaves the error surface untouched
+    /// in both directions rather than this restoring it afterwards. Restoring would have raced — there
+    /// is no re-entrancy guard here, so a manual Refresh tapped during the await would have had its
+    /// result stomped by a stale snapshot on resume. Not touching the state cannot race with anything.
+    ///
+    /// Requires a stored key, so it cannot fire during first-run setup where there is nothing to
+    /// authenticate with. Custom is excluded: `connectCustom()` already pulls its list, and its server
+    /// is the user's own machine rather than a vendor catalogue.
+    ///
+    /// Only the LIST moves. The selected model is never changed underneath the user. Kotlin twin:
+    /// `CoachViewModel.refreshModelsIfStale`.
+    func refreshModelsIfStale() async {
+        guard provider != .custom, hasKey else { return }
+        let last = UserDefaults.standard.double(forKey: Self.modelsRefreshedKey(provider))
+        guard Self.isCatalogueStale(last: last, now: Date().timeIntervalSince1970) else { return }
+        await refreshModels(silent: true)
+    }
+
+    /// `silent` leaves the error surface entirely alone, in both directions: an automatic refresh must
+    /// neither wipe a message the user is still reading nor raise one they never asked for. Kotlin twin:
+    /// the `silent` parameter on `CoachViewModel.refreshModels`.
+    func refreshModels(silent: Bool = false) async {
         guard let key = resolvedKey else {
-            errorText = AICoachError.noKey.errorDescription
+            if !silent { errorText = AICoachError.noKey.errorDescription }
             return
         }
-        errorText = nil
+        if !silent { errorText = nil }
 
         // Snapshot the provider BEFORE the await. The Picker isn't disabled during a refresh, so the
         // user can switch providers mid-flight (#873). We fetch this provider's ids, then re-check on
@@ -555,7 +601,7 @@ final class AICoachEngine: ObservableObject {
             guard provider == capturedProvider else { return }
 
             guard !ids.isEmpty else {
-                errorText = AICoachError.decode.errorDescription
+                if !silent { errorText = AICoachError.decode.errorDescription }
                 return
             }
 
@@ -566,9 +612,13 @@ final class AICoachEngine: ObservableObject {
             var merged = builtin + discovered
             if !merged.contains(model) { merged.insert(model, at: 0) }
             availableModels = merged
+            // Stamp only on a SUCCESSFUL pull, so a provider that is down does not buy itself a week
+            // of silence from `refreshModelsIfStale()`.
+            UserDefaults.standard.set(Date().timeIntervalSince1970,
+                                      forKey: Self.modelsRefreshedKey(capturedProvider))
         } catch let e as AICoachError {
             // A switch mid-flight makes any error moot for the old provider, so don't surface it.
-            guard provider == capturedProvider else { return }
+            guard provider == capturedProvider, !silent else { return }
             // Typed first, because this used to report EVERY failure as a network problem, including a
             // key the provider had just turned away. Refresh is one of the two places a wrong key shows
             // itself, and it was the one that blamed the wrong thing: the wearer read "Network problem"
@@ -578,7 +628,7 @@ final class AICoachEngine: ObservableObject {
             if case .badKey = e { keyRejected = true } else { keyRejected = false }
             return
         } catch {
-            guard provider == capturedProvider else { return }
+            guard provider == capturedProvider, !silent else { return }
             errorText = AICoachError.network(error.localizedDescription).errorDescription
             keyRejected = false
             return
@@ -690,6 +740,12 @@ final class AICoachEngine: ObservableObject {
     func send(_ userText: String) async {
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { errorText = AICoachError.emptyQuestion.errorDescription; return }
+        // The master switch, checked at the EGRESS rather than only on the routes in. Every way into Coach
+        // is gated, but "gated everywhere I thought of" is what #2254 got wrong once: a revoked consent
+        // survived in memory because the conversation never re-read it. A wearer can be STANDING on this
+        // screen when the switch goes off, and that path passes no tab. Refusing here makes "the AI is off"
+        // true however the screen was reached.
+        guard CoachBriefScheduler.coachMasterEnabled else { return }
         guard let key = resolvedKey else { errorText = AICoachError.noKey.errorDescription; return }
 
         // A transcript from an earlier local day is retired before the new turn is appended (#1542,
@@ -872,6 +928,10 @@ final class AICoachEngine: ObservableObject {
     /// context has no UI to stream into). Returns nil when not configured/consented, on any network
     /// failure, or when the reply is empty — the caller treats nil as "brief unavailable"; never throws.
     func generateBrief() async -> String? {
+        // Same master-switch gate as `send`, because this entry has NO UI at all: it is what the scheduler
+        // calls, and a caller that skipped the scheduler's own gate would otherwise reach a provider with
+        // the AI switched off.
+        guard CoachBriefScheduler.coachMasterEnabled else { return nil }
         guard isConfigured, dataConsent, let key = resolvedKey else { return nil }
         let context = await buildFullContext()
         let wire: [(role: ChatMessage.Role, content: String)] =

@@ -28,14 +28,14 @@ import UIKit
 
 struct SleepView: View {
     @EnvironmentObject var repo: Repository
-    /// For `circadianPhase` only (the body-clock dial). Named `appModel` because `model` on this screen is
-    /// already the built `SleepModel`.
-    @EnvironmentObject var appModel: AppModel
-    // NOTE: SleepView itself deliberately does NOT observe `LiveState`. A connected strap publishes
-    // at ~1 Hz; observing here would re-evaluate this heavy body on every tick. The only two live
-    // dependencies — the "going to sleep / awake" mark card (it appends to the strap log) and the
-    // "Syncing strap history…" note — each own their OWN `@EnvironmentObject var live` in a small
-    // leaf below (mirrors the Today leaf-scoping pattern), so a tick refreshes only that leaf.
+    // NOTE: SleepView itself deliberately does NOT observe `LiveState` OR `AppModel`. A connected strap
+    // publishes at ~1 Hz, and `AppModel` itself publishes `bpm` at that same ~1 Hz (AppModel.swift:202) —
+    // `@EnvironmentObject` subscribes to the WHOLE object's `objectWillChange` regardless of which
+    // properties are read, so holding either here would re-evaluate this heavy ~3000-line body on every
+    // tick. The live dependencies — the "going to sleep / awake" mark card (appends to the strap log),
+    // the "Syncing strap history…" note, and the body-clock dial's `circadianPhase` (#1680) — each own
+    // their OWN `@EnvironmentObject var live`/`appModel` in a small leaf below (mirrors the Today
+    // leaf-scoping pattern and HealthView.swift:17-22), so a tick refreshes only that leaf.
     @EnvironmentObject var intelligence: IntelligenceEngine
 
     /// Memoized snapshot of every expensive derivation (latest Night with its intervals
@@ -436,11 +436,10 @@ struct SleepView: View {
     /// affordance every other card on this screen already has, rather than a new setting of its own.
     @ViewBuilder
     private func bodyClockDial(_ model: SleepModel) -> some View {
-        if let phase = appModel.circadianPhase, phase.confidence != .unreadable {
-            BodyClockDialCard(estimate: phase,
-                              actualBedHour: Self.localClockHour(model.night.session.effectiveStartTs),
+        // PERF: `circadianPhase` lives on `AppModel`, isolated into its own leaf (`BodyClockDialSection`)
+        // rather than read via an `appModel: AppModel` property on this screen — see the NOTE above.
+        BodyClockDialSection(actualBedHour: Self.localClockHour(model.night.session.effectiveStartTs),
                               actualWakeHour: Self.localClockHour(model.night.session.endTs))
-        }
     }
 
     /// A unix second as a fractional local clock hour — the dial's only input beyond the phase estimate.
@@ -2911,9 +2910,12 @@ private struct SleepTimeEditor: View {
 
 #if DEBUG
 #Preview("Sleep") {
-    SleepView()
-        .environmentObject(Repository.previewSleep())
+    let repo = Repository.previewSleep()
+    return SleepView()
+        .environmentObject(repo)
         .environmentObject(LiveState())
+        .environmentObject(AppModel())
+        .environmentObject(IntelligenceEngine(repo: repo, profile: ProfileStore(), deviceId: "preview"))
         .frame(width: 980, height: 1180)
         .preferredColorScheme(.dark)
 }

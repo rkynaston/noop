@@ -1905,8 +1905,8 @@ private fun DetailRow(label: String, value: String) {
 }
 
 /**
- * Per-row overflow menu. A DETECTED bout can be re-labelled (becomes a real manual session that
- * survives re-detection) or dismissed (durably hidden so it doesn't come back). A MANUAL session can
+ * Per-row overflow menu. A grandfathered DETECTED bout can be re-labelled (becomes a real manual session)
+ * or dismissed (with its legacy marker retained). A MANUAL session can
  * be edited or deleted. Imported WHOOP / Apple rows are read-only — we never rewrite imported history
  * — but can be duplicated as an editable manual copy. (#107)
  */
@@ -2607,7 +2607,9 @@ private fun sportIconFuzzy(sport: String): ImageVector {
         s.contains("run") -> Icons.AutoMirrored.Filled.DirectionsRun
         s.contains("walk") || s.contains("hike") -> Icons.AutoMirrored.Filled.DirectionsWalk
         s.contains("cycl") || s.contains("bike") || s.contains("ride") || s.contains("spin") -> Icons.AutoMirrored.Filled.DirectionsBike
-        s.contains("swim") || s.contains("polo") -> Icons.Filled.Pool
+        // "polo" alone used to land here, which gave horseback Polo a swimming-pool glyph. Water polo
+        // is matched exactly above; this only needs to catch the free-typed run-together spelling.
+        s.contains("swim") || s.contains("water polo") || s.contains("waterpolo") -> Icons.Filled.Pool
         s.contains("row") -> Icons.Filled.Rowing
         s.contains("kayak") || s.contains("paddle") -> Icons.Filled.Kayaking
         s.contains("surf") -> Icons.Filled.Surfing
@@ -2623,7 +2625,7 @@ private fun sportIconFuzzy(sport: String): ImageVector {
         s.contains("softball") || s.contains("baseball") || s.contains("bowl") -> Icons.Filled.SportsBaseball
         s.contains("yoga") || s.contains("pilates") || s.contains("meditat") || s.contains("stretch") -> Icons.Filled.SelfImprovement
         s.contains("strength") || s.contains("weight") || s.contains("lift") -> Icons.Filled.FitnessCenter
-        s.contains("box") || s.contains("martial") || s.contains("jiu") || s.contains("judo") || s.contains("karate") || s.contains("wrestl") || s.contains("fenc") -> Icons.Filled.SportsMartialArts
+        s.contains("box") || s.contains("martial") || s.contains("jiu") || s.contains("judo") || s.contains("karate") || s.contains("muay") || s.contains("wrestl") || s.contains("fenc") -> Icons.Filled.SportsMartialArts
         s.contains("hiit") || s.contains("functional") || s.contains("gymnast") -> Icons.Filled.SportsGymnastics
         s.contains("tennis") || s.contains("padel") || s.contains("pickle") || s.contains("squash") || s.contains("racquet") || s.contains("badminton") -> Icons.Filled.SportsTennis
         s.contains("volleyball") -> Icons.Filled.SportsVolleyball

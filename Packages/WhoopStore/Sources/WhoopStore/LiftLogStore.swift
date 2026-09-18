@@ -129,6 +129,8 @@ public struct LiftProgramItemRow: Equatable, Codable, Sendable {
     public var targetRepsHigh: Int?
     /// Target RPE on the user's own 1-10 scale.
     public var targetRpe: Double?
+    /// Planned working weight in kilograms (v41). A program line plans a weight, not only reps.
+    public var targetWeightKg: Double?
     /// Intended rest after each set, seconds.
     public var restSec: Int?
     /// The user's own technique cue, stored and shown back verbatim.
@@ -144,6 +146,7 @@ public struct LiftProgramItemRow: Equatable, Codable, Sendable {
         targetRepsLow: Int?,
         targetRepsHigh: Int?,
         targetRpe: Double?,
+        targetWeightKg: Double?,
         restSec: Int?,
         note: String?
     ) {
@@ -156,6 +159,7 @@ public struct LiftProgramItemRow: Equatable, Codable, Sendable {
         self.targetRepsLow = targetRepsLow
         self.targetRepsHigh = targetRepsHigh
         self.targetRpe = targetRpe
+        self.targetWeightKg = targetWeightKg
         self.restSec = restSec
         self.note = note
     }
@@ -171,6 +175,7 @@ public struct LiftProgramItemRow: Equatable, Codable, Sendable {
             targetRepsLow: row["targetRepsLow"],
             targetRepsHigh: row["targetRepsHigh"],
             targetRpe: row["targetRpe"],
+            targetWeightKg: row["targetWeightKg"],
             restSec: row["restSec"],
             note: row["note"]
         )
@@ -191,6 +196,9 @@ public struct LiftSessionRow: Equatable, Codable, Sendable {
     public var programId: String?
     /// The program's name AS IT WAS when the session ran, so a later rename never rewrites history.
     public var programName: String?
+    /// Session RPE, 0-10 Borg CR10 (v41). A NUMBER, not a note: Foster's session load is sRPE x
+    /// duration, so the rating has to be computable. Nil when the user skipped rating the session.
+    public var sessionRpe: Double?
     public var note: String?
 
     public init(
@@ -201,6 +209,7 @@ public struct LiftSessionRow: Equatable, Codable, Sendable {
         sport: String,
         programId: String?,
         programName: String?,
+        sessionRpe: Double?,
         note: String?
     ) {
         self.id = id
@@ -210,6 +219,7 @@ public struct LiftSessionRow: Equatable, Codable, Sendable {
         self.sport = sport
         self.programId = programId
         self.programName = programName
+        self.sessionRpe = sessionRpe
         self.note = note
     }
 
@@ -222,6 +232,7 @@ public struct LiftSessionRow: Equatable, Codable, Sendable {
             sport: row["sport"],
             programId: row["programId"],
             programName: row["programName"],
+            sessionRpe: row["sessionRpe"],
             note: row["note"]
         )
     }
@@ -331,12 +342,60 @@ extension WhoopStore {
     /// twice updates its classification and recency instead of duplicating it. A muscle field is
     /// only overwritten when the caller supplies one, so merely using an exercise never erases the
     /// classification the user set for it.
+    /// How many exercises one device remembers.
+    ///
+    /// A cap exists because the vocabulary is typo-accumulating by design: every misspelling becomes
+    /// a permanent picker entry ("Chest supported row3"). It is set high enough that no real
+    /// training history reaches it — a broad lifter's whole vocabulary is well under a hundred — so
+    /// hitting it means something has gone wrong, and the honest response is to say so rather than
+    /// to silently drop what the user typed or to evict something they still use.
+    ///
+    /// An EXISTING name always updates, cap or no cap: only genuinely NEW names are refused.
+    public static let maxRememberedExercises = 500
+
+    /// How long a PROGRAM note may be.
+    ///
+    /// 120 because that is what can actually be SEEN: the hub renders it under the program name at
+    /// `lineLimit(3)` in caption type, in a column narrowed by the Start button — roughly three
+    /// lines on a phone. A longer note is not
+    /// stored-and-shown, it is stored-and-silently-truncated, and typing into a field that quietly
+    /// discards the end is worse than a field that stops.
+    public static let maxProgramNoteLength = 120
+
+    /// How long an EXERCISE (technique) note may be.
+    ///
+    /// 200, about four lines. Longer than a program note because it is a cue you read BETWEEN sets
+    /// — "slow eccentric, pause at the bottom, don't let the elbows flare" — and shorter than
+    /// unlimited because it renders directly above the set rows and every line pushes them down the
+    /// screen. Both are a MAXIMUM, not a target — a one-line note is usually the better note.
+    public static let maxExerciseNoteLength = 200
+
+    /// Thrown when the vocabulary is full and the name is a new one.
+    public struct LiftExerciseVocabularyFull: Error, Equatable {
+        public let limit: Int
+        public init(limit: Int) { self.limit = limit }
+    }
+
     @discardableResult
     public func upsertLiftExercises(_ rows: [LiftExerciseRow]) async throws -> Int {
         guard !rows.isEmpty else { return 0 }
         return try syncWrite { db in
             var n = 0
             for r in rows {
+                // Only a NEW name can push the vocabulary over: re-saving one that already exists is
+                // an update and must always be allowed, or a user at the cap could no longer correct
+                // the classification of an exercise they use every week.
+                let known = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM liftExercise WHERE deviceId = ? AND name = ?
+                    """, arguments: [r.deviceId, r.name]) ?? 0
+                if known == 0 {
+                    let total = try Int.fetchOne(db, sql: """
+                        SELECT COUNT(*) FROM liftExercise WHERE deviceId = ?
+                        """, arguments: [r.deviceId]) ?? 0
+                    if total >= WhoopStore.maxRememberedExercises {
+                        throw LiftExerciseVocabularyFull(limit: WhoopStore.maxRememberedExercises)
+                    }
+                }
                 try db.execute(sql: """
                     INSERT INTO liftExercise
                         (id, deviceId, name, primaryMuscle, secondaryMuscles, createdAt, lastUsedTs)
@@ -450,11 +509,12 @@ extension WhoopStore {
                 try db.execute(sql: """
                     INSERT INTO liftProgramItem
                         (id, deviceId, programId, ord, exercise, targetSets,
-                         targetRepsLow, targetRepsHigh, targetRpe, restSec, note)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         targetRepsLow, targetRepsHigh, targetRpe, targetWeightKg, restSec, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, arguments: [
                         r.id, r.deviceId, r.programId, r.ord, r.exercise, r.targetSets,
-                        r.targetRepsLow, r.targetRepsHigh, r.targetRpe, r.restSec, r.note,
+                        r.targetRepsLow, r.targetRepsHigh, r.targetRpe, r.targetWeightKg,
+                        r.restSec, r.note,
                     ])
                 n += db.changesCount
             }
@@ -486,16 +546,18 @@ extension WhoopStore {
             for r in rows {
                 try db.execute(sql: """
                     INSERT INTO liftSession
-                        (id, deviceId, startTs, endTs, sport, programId, programName, note)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (id, deviceId, startTs, endTs, sport, programId, programName,
+                         sessionRpe, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(deviceId, startTs, sport) DO UPDATE SET
                         endTs = excluded.endTs,
                         programId = excluded.programId,
                         programName = excluded.programName,
+                        sessionRpe = excluded.sessionRpe,
                         note = excluded.note
                     """, arguments: [
                         r.id, r.deviceId, r.startTs, r.endTs, r.sport,
-                        r.programId, r.programName, r.note,
+                        r.programId, r.programName, r.sessionRpe, r.note,
                     ])
                 n += db.changesCount
             }
@@ -619,7 +681,7 @@ extension WhoopStore {
     /// though a hard set is the thing that drives adaptation — because the reference doses were
     /// derived from unfiltered working-set counts, and filtering here would quietly compare a
     /// smaller number against a scale built from a larger one. Proximity to failure is reported
-    /// separately by `liftRpeProfile` instead, where it can inform without corrupting the count.
+    /// separately by `LiftMetrics.rpeProfile` instead, where it can inform without corrupting the count.
     public func liftSetCounts(
         deviceId: String,
         fromTs: Int,
@@ -641,7 +703,16 @@ extension WhoopStore {
                 if let token: String = row["primaryMuscle"], let m = LiftMuscle(rawValue: token) {
                     direct[m, default: 0] += 1
                 }
-                for m in LiftMuscle.decodeList(row["secondaryMuscles"]) {
+                // A muscle listed BOTH as primary and as secondary is credited once, as direct.
+                // `LiftMuscle.encodeList(_:excluding:)` already strips the primary on the way in, so
+                // today no stored row needs this — but "today no row needs it" is not a guarantee,
+                // and without the guard this aggregation and `LiftMetrics.muscleCounts` (which has
+                // always had it) would report DIFFERENT numbers for the same set: the hub's weekly
+                // card and the session detail, disagreeing, with nothing to catch it. The two are
+                // pinned against each other by
+                // `LiftMetricsStoreAgreementTests.testBothImplementationsAgree…`.
+                let primary: LiftMuscle? = (row["primaryMuscle"] as String?).flatMap(LiftMuscle.init(rawValue:))
+                for m in LiftMuscle.decodeList(row["secondaryMuscles"]) where m != primary {
                     indirect[m, default: 0] += 1
                 }
             }
@@ -652,50 +723,4 @@ extension WhoopStore {
         }
     }
 
-    /// How hard the working sets in a window actually were, reported separately from the counts.
-    ///
-    /// Proximity to failure is what makes a set count biologically, but it is NOT folded into
-    /// `liftSetCounts` — see that method for why. Sets with no RPE recorded are excluded from the
-    /// average and reported as `unrated`, rather than being silently treated as easy or as hard.
-    public func liftRpeProfile(
-        deviceId: String,
-        fromTs: Int,
-        toTs: Int,
-        hardThreshold: Double = 7
-    ) async throws -> (workingSets: Int, rated: Int, unrated: Int, meanRpe: Double?, atOrAboveThreshold: Int) {
-        try syncRead { db in
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT s.rpe AS rpe
-                FROM liftSet s
-                JOIN liftSession sess ON sess.id = s.sessionId
-                WHERE s.deviceId = ?
-                  AND sess.startTs >= ? AND sess.startTs <= ?
-                  AND s.isWarmup = 0
-                """, arguments: [deviceId, fromTs, toTs])
-
-            var rated: [Double] = []
-            var unrated = 0
-            for row in rows {
-                if let v: Double = row["rpe"] { rated.append(v) } else { unrated += 1 }
-            }
-            let mean = rated.isEmpty ? nil : rated.reduce(0, +) / Double(rated.count)
-            return (workingSets: rows.count,
-                    rated: rated.count,
-                    unrated: unrated,
-                    meanRpe: mean,
-                    atOrAboveThreshold: rated.filter { $0 >= hardThreshold }.count)
-        }
-    }
-
-    /// Distinct exercise names this device has ever logged, alphabetical — the suggestion list for
-    /// the program editor, built from the user's own history rather than a shipped catalogue.
-    public func liftExercisesLogged(deviceId: String) async throws -> [String] {
-        try syncRead { db in
-            try String.fetchAll(db, sql: """
-                SELECT DISTINCT exercise FROM liftSet
-                WHERE deviceId = ?
-                ORDER BY exercise ASC
-                """, arguments: [deviceId])
-        }
-    }
 }

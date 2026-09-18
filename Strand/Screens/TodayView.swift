@@ -277,6 +277,9 @@ struct TodayView: View {
     @State private var customizationDestination: TodayCustomizationDestination?
     // Hydration tracker (opt-in, default OFF). When off the hydration dashboard card is hidden even if a
     // user had it in their saved selection, the feature owns its own gate.
+    /// The Coach master switch (`noop.coachEnabled`, shared by name with Android). Default ON. Gates the
+    /// Today launcher card here; the tab and the daily brief read the same key.
+    @AppStorage("noop.coachEnabled") private var coachEnabled = true
     @AppStorage(HydrationStore.enabledKey) private var hydrationEnabled = false
     /// Today's hydration total + goal (ml), loaded in loadAll when the feature is on. nil hides the value.
     @State private var hydrationTotalML: Double?
@@ -287,6 +290,10 @@ struct TodayView: View {
         // It's not in the default selection, so a fresh install never shows it until both are true.
         DashboardCardPrefs.decodeEnabled(dashboardCardsRaw)
             .filter { hydrationEnabled || $0 != .hydration }
+            // Coach off means the AI is off, so the launcher card goes with the tab: leaving it on
+            // Today would offer a feature the wearer has just switched off. Same gate shape as
+            // hydration above, so a card they had added keeps its place and returns on re-enable.
+            .filter { coachEnabled || $0 != .coach }
     }
 
     // #755: a mirror of `LiveState.backfilling` (strap mid history-offload). TodayView must NOT observe
@@ -1551,6 +1558,7 @@ struct TodayView: View {
             derivedKey = newKey
         }
         .onAppear {
+            DashboardCardPrefs.migrateLegacyStepsAverage()
             if derivedKey != todayInputKey {
                 derived = buildDerived()
                 derivedKey = todayInputKey
@@ -2670,6 +2678,8 @@ struct TodayView: View {
     private func dashboardCardRow(_ card: DashboardCard) -> some View {
         let tint = dashboardTint(card)
         switch card {
+        case .stepsAverage30:
+            RollingStepsAverageCard(day: selectedDayKey)
         case .stress:
             pinnedCardRow(icon: card.icon, tint: tint, title: card.title, subtitle: card.subtitle,
                           value: dashboardValue(card), route: .stress)
@@ -2718,7 +2728,7 @@ struct TodayView: View {
         case .bloodOxygen: return StrandPalette.metricCyan
         case .skinTemp:    return StrandPalette.metricAmber
         case .sleep:       return StrandPalette.restColor
-        case .steps:       return StrandPalette.metricCyan
+        case .steps, .stepsAverage30: return StrandPalette.metricCyan
         case .calories:    return StrandPalette.metricAmber
         case .hydration:   return StrandPalette.metricCyan
         case .coupled:     return StrandPalette.chargeColor
@@ -2737,6 +2747,8 @@ struct TodayView: View {
             return card.unit.isEmpty ? s : "\(s) \(card.unit)"
         }
         switch card {
+        case .stepsAverage30:
+            return "" // The self-loading card owns its result and coverage together.
         case .hrv:
             #if DEBUG
             if let f = DemoDayHarness.active { return withUnit("\(f.hrvMs)") }

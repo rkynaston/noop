@@ -732,7 +732,7 @@
     <string name="l10n_onboarding_screen_import_apple_health_export_077b5624">Importar exportação do Apple Health</string>
     <string name="l10n_onboarding_screen_import_from_health_connect_35d55e21">Importar do Health Connect</string>
     <string name="l10n_onboarding_screen_import_whoop_export_zip_16f4176b">Importar exportação WHOOP (. zip)</string>
-    <string name="l10n_onboarding_screen_light_a36ef8ab">Luz</string>
+    <string name="l10n_onboarding_screen_light_a36ef8ab">Claro</string>
     <string name="l10n_onboarding_screen_make_it_yours_54135155">Faça com que seja o seu</string>
     <string name="l10n_onboarding_screen_no_whoop_you_can_still_continue_ec58d88d">Não, Uau? Ainda pode continuar. Emparelhe uma bracelete de frequência cardíaca (Polar, Wahoo, Coospo, Garmin HRM…)</string>
     <string name="l10n_onboarding_screen_nothing_leaves_your_phone_502d5d0c">Nada sai do teu telemóvel</string>
@@ -2709,6 +2709,12 @@
     <string name="coach_clear_action">Apagar</string>
     <string name="coach_token_estimate">~%1$d tokens</string>
     <string name="coach_token_warning">" · pode exceder janelas de contexto pequenas"</string>
+    <string name="l10n_coach_settings_screen_customised_your_edited_instructions_frame_every_reply_bab91200">Personalizado. As tuas instruções editadas enquadram cada resposta.</string>
+    <string name="l10n_coach_settings_screen_edit_how_the_coach_thinks_and_talks_takes_5104835d">Edite como o treinador pensa e fala. Entra em vigor na tua próxima mensagem.</string>
+    <string name="l10n_coach_settings_screen_collapse_coach_instructions_0933974a">Recolher instruções do treinador</string>
+    <string name="l10n_coach_settings_screen_edit_coach_instructions_63a38c3a">Editar instruções do treinador</string>
+    <string name="coach_settings">Definições do coach</string>
+    <string name="coach_settings_subtitle">O que o coach pode ler, como lhe é pedido que responda e quando te escreve.</string>
     <string name="coach_morning_brief">Resumo matinal</string>
     <string name="coach_morning_brief_desc">Uma notificação local com a prontidão + plano de treino de hoje, gerada no dispositivo todas as manhãs.</string>
     <string name="coach_morning_brief_off">Desativado: nada é gerado nem enviado num agendamento.</string>
@@ -2766,5 +2772,6 @@
     <string name="l10n_today_screen_scan_and_connect_40157030">Procurar e ligar</string>
     <string name="l10n_health_screen_fitness_age_stops_here_vo_max_383d989a">A idade de forma física para aqui. O VO₂máx não.</string>
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">Um ecrã de stress que acompanha, leituras do WHOOP 5 nas unidades que a pulseira envia, e um anel que deixa de se repetir</string>
-    <string name="l10n_app_changelog_historical_r_r_as_the_sole_26c6f81d">Historical R-R as the sole persisted authority</string>
+    <string name="l10n_settings_screen_ai_coach_130c3eab">Treinador de IA</string>
+    <string name="l10n_app_changelog_a_gym_log_book_on_your_e0f00272">Um caderno de ginásio no pulso, um Coach que podes desligar, e um atalho para sincronizar a pulseira</string>
 </resources>

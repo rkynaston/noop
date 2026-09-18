@@ -151,7 +151,7 @@ struct StressWidgetView: View {
                 .foregroundStyle(StrandPalette.textPrimary)
 
             HStack(alignment: .lastTextBaseline, spacing: 4) {
-                Text(latest.map { String(format: "%.1f", $0) } ?? "—")
+                Text(latest.map { StressTrace.formatLevel($0) } ?? "—")
                     .font(.system(size: 30, weight: .bold, design: .rounded))
                     .foregroundStyle(StrandPalette.textPrimary)
                 if latest != nil {
@@ -168,7 +168,7 @@ struct StressWidgetView: View {
                         .formatted(date: .omitted, time: .shortened)
                     HStack(spacing: 4) {
                         Text("Peak")
-                        Text(verbatim: String(format: "%.1f", peak) + " · " + peakTime)
+                        Text(verbatim: StressTrace.formatLevel(peak) + " · " + peakTime)
                     }
                     .font(.system(size: 11))
                     .foregroundStyle(StrandPalette.textPrimary)
@@ -209,7 +209,7 @@ struct StressWidgetView: View {
                     // needed a new entry in ten locales to say what these two already say.
                     if let stats {
                         HStack(spacing: 0) {
-                            Text("avg \(String(format: "%.1f", stats.mean))")
+                            Text("avg \(StressTrace.formatLevel(stats.mean))")
                             Text(verbatim: " · ")
                             Text("Updated \(updated, format: .dateTime.hour().minute())")
                         }
@@ -234,12 +234,12 @@ struct StressWidgetView: View {
     /// here would ship to every locale with the gate green.
     private var accessibilityText: String {
         guard let latest else { return String(localized: "Stress, no reading today") }
-        let now = String(format: "%.1f", latest)
+        let now = StressTrace.formatLevel(latest)
         guard let stats, let peak = stats.peak.level else {
             return String(localized: "Stress \(now) of 3")
         }
-        let peakText = String(format: "%.1f", peak)
-        let meanText = String(format: "%.1f", stats.mean)
+        let peakText = StressTrace.formatLevel(peak)
+        let meanText = StressTrace.formatLevel(stats.mean)
         return String(localized: "Stress \(now) of 3, average \(meanText), peak \(peakText)")
     }
 }

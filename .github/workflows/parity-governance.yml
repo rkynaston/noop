@@ -1,8 +1,11 @@
-# These are the scanner's own unit and repository-acceptance tests.
+# These are the scanner's own unit and repository-acceptance tests, plus the
+# explicitly named legacy R-R preservation contract. Keep that companion test
+# exact rather than widening back to every Tools/tests file.
 #
 # On a PULL REQUEST, run the multi-minute suite only when its implementation,
-# authority, tests or workflow change; ordinary product-source changes belong to
-# the later ledger/ratchet gate, not to repeated self-testing of the scanner.
+# authority, named protection tests or workflow change; ordinary product-source
+# changes belong to the later ledger/ratchet gate, not to repeated self-testing
+# of the scanner.
 #
 # It also runs DAILY on main. One of these tests is not about the scanner at
 # all: the repository acceptance asserts that the checked-in authority still
@@ -29,7 +32,8 @@ on:
       - 'Tools/issue_ref.py'
       - 'Tools/parity_*.py'
       - 'Tools/parity_*.json'
-      - 'Tools/tests/**'
+      - 'Tools/tests/test_parity_*.py'
+      - 'Tools/tests/test_rr_legacy_preservation_contract.py'
       - '.github/workflows/parity-governance.yml'
   push:
     branches: [main]
@@ -37,7 +41,8 @@ on:
       - 'Tools/issue_ref.py'
       - 'Tools/parity_*.py'
       - 'Tools/parity_*.json'
-      - 'Tools/tests/**'
+      - 'Tools/tests/test_parity_*.py'
+      - 'Tools/tests/test_rr_legacy_preservation_contract.py'
       - '.github/workflows/parity-governance.yml'
   # Daily, so authority staleness is found on a schedule instead of by whoever
   # next edits Tools/. See the header note.
@@ -64,11 +69,16 @@ jobs:
       - name: Run parity-governance tests
         run: |
           set -o pipefail
-          python3 -m unittest discover -s tests -p "test_*.py" -v 2>&1 | tee "$RUNNER_TEMP/out.txt"
+          python3 -m unittest -v \
+            tests.test_parity_ledger \
+            tests.test_parity_governance_acceptance \
+            tests.test_rr_legacy_preservation_contract \
+            tests.test_parity_disposition_kinds \
+            2>&1 | tee "$RUNNER_TEMP/out.txt"
           ran=$(grep -oE '^Ran [0-9]+ test' "$RUNNER_TEMP/out.txt" | grep -oE '[0-9]+')
           echo "collected ${ran:-0} tests"
-          if [ "${ran:-0}" -lt 103 ]; then
-            echo "::error::expected at least 103 parity-governance tests, collected ${ran:-0} — discovery is broken, not the suite"
+          if [ "${ran:-0}" -lt 122 ]; then
+            echo "::error::expected at least 122 parity-governance tests, collected ${ran:-0} — discovery is broken, not the suite"
             exit 1
           fi
         working-directory: Tools

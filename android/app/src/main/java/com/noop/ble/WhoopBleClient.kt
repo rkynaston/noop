@@ -40,6 +40,7 @@ import com.noop.protocol.DYN_ACCEL_STILL_THRESHOLD_G
 import com.noop.protocol.BackfillCaptureJsonl
 import com.noop.protocol.BackfillCaptureRecord
 import com.noop.protocol.BackfillCaptureSummary
+import com.noop.protocol.wireName
 import com.noop.protocol.CommandNumber
 import com.noop.protocol.FeatureFlagWriteGate
 import com.noop.protocol.R22DisableReport
@@ -2760,20 +2761,19 @@ class WhoopBleClient(
     /** Address of the strap we last connected to — for persisting it + auto-reconnecting on launch (#67). */
     val lastDeviceAddress: String? get() = lastDevice?.address
 
-    /// Has [connectedFamily] been established from THIS connection's service discovery?
-    ///
-    /// [connectedFamily] defaults to WHOOP4 and is only ever written in onServicesDiscovered, and is NOT
-    /// cleared between connections (this flag is - clearing [connectedFamily] itself would change the
-    /// handleDisconnect paths that read it after teardown). So before discovery it holds either that
-    /// default or the family of the PREVIOUS link. Both are guesses, and the source must not come from a
-    /// guess: the 4.0's standard 0x2A19 characteristic is a stub (#77), so a 4.0 reached while this still
-    /// said WHOOP5 read the stub and BANKED it. In one field log that stub read 81% against a true 39.2%,
-    /// and banked samples feed the discharge-slope estimate (#713), so the error reaches the readout and
-    /// not just the log line. Cleared in [reset] with the rest of the per-connection state.
-    /// @Volatile and always read BEFORE [connectedFamily] (Kotlin evaluates arguments left to right, so
-    /// `batterySource(familyEstablished, connectedFamily)` is the correct order): seeing this true then
-    /// establishes happens-before for the [connectedFamily] write that precedes it at discovery. Swapping
-    /// the two parameters would silently drop that guarantee.
+    /**
+     * The model established from THIS connection's discovered service, or null before discovery.
+     *
+     * The picker is only a request: scan fallback and easy-connect can establish the other family, so
+     * persisting the picker beside [lastDeviceAddress] makes the saved pair untrue and feeds that wrong
+     * family back into the next direct reconnect (#2068). [familyEstablished] must be read BEFORE
+     * [connectedFamily]: it is the volatile publication edge for the family write in service discovery.
+     * Kotlin evaluates arguments left to right, so this call preserves that ordering and never exposes
+     * the default or the previous link's family as evidence for the current one.
+     */
+    internal val establishedModel: WhoopModel?
+        get() = establishedWhoopModel(familyEstablished, connectedFamily)
+
     /** #1634: last firmware-gate line logged, so a stable per-connection value is not repeated on every
      *  hello. Cleared in [reset] with the rest of the per-connection state. */
     @Volatile private var loggedFirmwareGate: String? = null
@@ -6749,6 +6749,9 @@ class WhoopBleClient(
                     // #1809: this link's inbound tally starts empty, so the epitaph on disconnect reports
                     // exactly what arrived on THIS link and never a previous session's traffic.
                     inboundFrames = 0; inboundBytes = 0; cmdChannelFrames = 0
+                    // Same guarantee for the rejection tally: a link that opens without a preceding clean
+                    // teardown would otherwise report the previous link's rejections as its own.
+                    rejectTally.reset(); loggedRejectReasons.clear()
                     // #1635: same guarantee for the banked tally. Clearing only on teardown would be enough if
                     // every link ended in one; a link that begins without a preceding clean teardown would
                     // otherwise open holding the previous link's rows and report them as banked on this one.
@@ -7328,6 +7331,21 @@ class WhoopBleClient(
     private var inboundBytes = 0
     private var cmdChannelFrames = 0
 
+    /**
+     * Frames this link REJECTED, per reason, plus the one named counter for the class that used to pass
+     * the gates (payload CRC32 verified, envelope not). Per CONNECTION, because that is the unit the
+     * readout is about; cleared with the inbound tally at connect and at teardown. Twin of the Swift
+     * `FrameRouter.rejectTally`.
+     */
+    private val rejectTally = FrameRejectTally()
+
+    /**
+     * Reasons already reported on this connection, so the Test Centre line is one per REASON rather than
+     * one per frame: a noisy link rejects continuously, and a per-frame line would bury the transition
+     * that carries the information.
+     */
+    private val loggedRejectReasons = HashSet<com.noop.protocol.FrameRejectReason>()
+
     // #1635: rows ACCEPTED on this link, split by PATH. The realtime decoder (`extractStreams`) only
     // ever produces hr/rr/events/battery; gravity, resp, skinTemp, spo2 and steps arrive solely through
     // the offload's historical decoder. Counting one path and naming streams from the other printed a
@@ -7443,7 +7461,15 @@ class WhoopBleClient(
                 uuid in WHOOP5_NOTIFY_CHARS -> {
                 // Reassemble (no-op for already-complete frames) then route each complete frame.
                 // Port of: for frame in reassembler.feed(bytes) { router.handle(frame:) }.
-                for (frame in reassembler.feed(bytes)) {
+                //
+                // A byte run whose declared total is below the family minimum is dropped INSIDE the
+                // reassembler and reaches no parser and no archive, so its monotonic drop count is folded
+                // into the connection's reject tally right after the feed that may have grown it —
+                // otherwise it would disappear without trace. Idempotent, so once per notification is
+                // both correct and cheap. Twin of the Swift `FrameRouter.noteReassemblerDrops`.
+                val completedFrames = reassembler.feed(bytes)
+                rejectTally.absorbReassemblerDrops(reassembler.belowMinimumLengthDrops)
+                for (frame in completedFrames) {
                   // #453 defense-in-depth: this loop runs on the GATT binder thread; an uncaught throw
                   // from ANY frame op (handleFrame, a decoder, the inline date-format, log) would crash
                   // the whole app — the exact chain the redactPii bug escaped through. Wrap the whole
@@ -7575,6 +7601,18 @@ class WhoopBleClient(
                             handleBroadcastHrGateReadBack(frame, connectedFamily == DeviceFamily.WHOOP5)
                         }
                     }
+                    // WHAT IS AND IS NOT GATED HERE (standing risk, recorded rather than fixed).
+                    // Every other branch in this dispatch block keys on a RAW BYTE COMPARE of the command
+                    // opcode, before any integrity verdict, and that is unchanged: the state-driving
+                    // consumers are gated (the router above, the history-metadata classifier, both
+                    // extractors and this reply), and this change does not claim "every frame consumer".
+                    // Of the probe replies dispatched above, the feature-flag probe and the device-config
+                    // READ probe verify inside their own decoder (`Framing.frameCrcOk`); the extended-
+                    // battery (#592), body-location (#690) and battery-pack probes and the write-ack
+                    // branches do NOT, and stay that way — none drives live state or the offload. The
+                    // exposure there is a diagnostic asserting something the strap never said: a real
+                    // violation of "a diagnostic may only assert what it can attribute", but a reading,
+                    // not a data path. Hardening them is a scope decision, not this change's.
                     if (frame.size > cmdOff && (frame[cmdOff].toInt() and 0xFF) == CommandNumber.GET_DATA_RANGE.rawValue) {
                         // #451: dump raw GET_DATA_RANGE response bytes unconditionally (even if decode returns
                         // null) so a stale/wrong-epoch "newest" can be told apart from a frame-alignment bug in
@@ -7608,7 +7646,31 @@ class WhoopBleClient(
                                 )
                             }
                         }
-                        dataRangeNewestUnix(frame)?.let {
+                        // GATED ON THE FULL VERDICT from here down, unlike the probe replies above,
+                        // because this one has OFFLOAD effect: the newest/oldest words it yields become
+                        // the plausibility window every drained record is checked against (#547). A
+                        // damaged reply that narrows that window makes the real records of the same sync
+                        // fall through it — the section then persists nothing, and is acknowledged
+                        // anyway, which is the same permanent loss the integrity gate exists to stop.
+                        // `parsed` is the single parse from the seam above, so this costs one Boolean
+                        // read and no re-parse. Twin of the Swift BLEManager `handleDataRangeResponse`
+                        // gate; the raw dump and the #689 backlog line ABOVE stay ungated on purpose,
+                        // because a damaged range reply is exactly the event a strap log needs to show,
+                        // and neither of them touches sync state.
+                        // The decision itself lives in `DataRange.acceptsReply`, the twin of the Swift
+                        // predicate, so a unit test can hold the gate instead of only the parse.
+                        val acceptsWindow = com.noop.protocol.DataRange.acceptsReply(
+                            frame, cmdOff, CommandNumber.GET_DATA_RANGE.rawValue,
+                        ) { parsed.ok }
+                        if (!acceptsWindow) {
+                            log(
+                                "Get Data Range reply REJECTED by the frame-integrity check " +
+                                    "(reason=${parsed.rejectReason.wireName}) — the strap's banked-record " +
+                                    "window is left unchanged (#547 plausibility bounds keep their previous " +
+                                    "values). The raw frame above is the evidence.",
+                            )
+                        }
+                        (if (acceptsWindow) dataRangeNewestUnix(frame) else null)?.let {
                             strapNewestTs = it
                             // Capture the wall clock of THIS reading so the backfiller correlation pairs
                             // the strap's device time with the wall time of the same instant (see field doc).
@@ -7848,6 +7910,43 @@ class WhoopBleClient(
     }
 
     /**
+     * Count one rejected frame and say something about it exactly once (D3).
+     *
+     * Two different visibility rules, on purpose:
+     *
+     *  - The class where the payload CRC32 VERIFIED while the envelope did not is announced always-on,
+     *    at its first sighting. It is the class that passed every gate before this change, it is what
+     *    the hardware run's abort criterion reads, and it costs nothing on a link where it never
+     *    happens — which is the whole point of leaving rare-event evidence unconditional.
+     *  - The ordinary per-connection detail sits behind the Test Centre's Connection domain, one line
+     *    per REASON. A resync after a lost notification rejects frames routinely and always has; a line
+     *    per frame would be noise, and the general per-reason counter is explicitly NOT the abort signal.
+     *
+     * Each line reports only what the parse result observed: the reason the verifier gave, and the
+     * packet type the decoder actually read (a rejected frame keeps it). Twin of the Swift
+     * `FrameRouter.noteRejectedFrame`.
+     */
+    private fun noteRejectedFrame(parsed: com.noop.protocol.ParsedFrame) {
+        val hadAdmittedClass = rejectTally.payloadCrcOkButEnvelopeRejected > 0
+        val reason = rejectTally.note(parsed)
+        if (!hadAdmittedClass && rejectTally.payloadCrcOkButEnvelopeRejected > 0) {
+            log(
+                "Frame rejected while its payload CRC32 verified " +
+                    "(reason=${reason.wireName}, type=${parsed.typeName}) — the frame class that " +
+                    "reached live state before the integrity gate.",
+            )
+        }
+        if (testCentre.active(com.noop.testcentre.TestDomain.CONNECTION) &&
+            loggedRejectReasons.add(reason)
+        ) {
+            log(
+                "frameReject reason=${reason.wireName} type=${parsed.typeName}",
+                com.noop.testcentre.TestDomain.CONNECTION,
+            )
+        }
+    }
+
+    /**
      * Pure decode→state router for one COMPLETE frame.
      * Direct port of `FrameRouter.handle(frame:)`.
      */
@@ -7860,9 +7959,15 @@ class WhoopBleClient(
      *  instead of twice (this router path + the live-collector flush). `frame` is still passed for the
      *  byte-level sub-decoders. */
     private fun handleFrame(frame: ByteArray, parsed: com.noop.protocol.ParsedFrame, replayedOffload: Boolean = false) {
-        if (!parsed.ok) return
-        // Reject frames that failed their checksum — never let bad bytes drive state.
-        if (parsed.crcOk == false) return
+        // ONE gate, the verifier's FULL verdict: header checksum, payload CRC32 and structural length
+        // together. This used to be two steps — a parse-succeeded flag, then a separate payload-CRC
+        // check — and between them sat the class this change closes: a frame whose payload CRC32 is
+        // right while its header checksum or declared length is not. Never let bad bytes drive state.
+        // Twin of the Swift `FrameRouter.handle`.
+        if (!parsed.ok) {
+            noteRejectedFrame(parsed)
+            return
+        }
 
         // Connection test mode: accumulate frames by type and flush ONE `frameTiming` SUMMARY line per
         // rolling window (#1151), instead of a line per frame-TYPE transition — during offloads/command
@@ -9858,7 +9963,12 @@ class WhoopBleClient(
         val now = (System.currentTimeMillis() / 1000L).toInt()
         val parsed = frames.map { it.second }   // #47: the dispatcher already decoded these — don't re-parse
         val newestRealtimeTs = parsed.asSequence()
-            .filter { it.ok && it.crcOk != false && it.typeName == "REALTIME_DATA" }
+            // The FULL verdict in one condition. `crcOk != false` used to sit beside it and was the
+            // loose half: it passed a frame whose CRC32 could not be computed at all, and said nothing
+            // about the header checksum or the declared length. `ok` now covers all three, so a frame
+            // with a forged timestamp cannot become the anchor this whole batch of live HR is stamped
+            // against.
+            .filter { it.ok && it.typeName == "REALTIME_DATA" }
             .mapNotNull { (it.parsed["timestamp"] as? Number)?.toInt() }
             .maxOrNull() ?: now
         val streams: Streams = extractStreams(parsed, deviceClockRef = newestRealtimeTs, wallClockRef = now)
@@ -9873,8 +9983,6 @@ class WhoopBleClient(
                 val census = com.noop.analytics.RrEmissionStats.compute(streams.rr.map { it.ts to it.rrMs })
                 log(com.noop.analytics.RrEmissionStats.logLine("live-realtime", streams.rr.size, null, census))
             }
-        }
-        if (streams.rr.isNotEmpty()) {
             log("rr source=r10r11 liveReceived=${streams.rr.size} persisted=0 mode=ui-only")
         }
         if (!batch.isEmpty) {
@@ -9941,7 +10049,7 @@ class WhoopBleClient(
         if (shouldFlush) ioScope.launch { flushStandardHr() }
     }
 
-    /** Persist the buffered standard HR/RR. Re-buffers on failure. Port of `Collector.flushStandardHR`. */
+    /** Persist standard HR/contact, retrying those on failure. R-R is consumed as live-only. */
     private suspend fun flushStandardHr() {
         val (hr, rr, contact) = synchronized(collectorLock) {
             if (stdHr.isEmpty() && stdRr.isEmpty() && stdContact.isEmpty()) return
@@ -9963,17 +10071,15 @@ class WhoopBleClient(
                 // and this census runs before the insert. The line renders `inserted=n/a`.
                 log(com.noop.analytics.RrEmissionStats.logLine("live-standard", rr.size, null, census))
             }
-        }
-        if (rr.isNotEmpty()) {
             log("rr source=standard liveReceived=${rr.size} persisted=0 mode=ui-only")
         }
         try {
-            // NOOP 11.7.1: keep standard HR/contact persistence unchanged; R-R is live-only.
             addBankedLive(repository.insert(StreamBatch(hr = hr, events = contact), deviceId))
             liveInsertFailuresStd.set(0)
         } catch (t: Throwable) {
             synchronized(collectorLock) {
                 stdHr.addAll(0, hr); stdContact.addAll(0, contact)
+                // R-R already served its live consumers and has no durable sink to retry.
             }
             // Swallowing this made the instrumentation above read like success: a store failing every
             // insert produced a log full of `rr emit ... offered=N` and no sign that none of it landed.
@@ -9986,7 +10092,7 @@ class WhoopBleClient(
                     throwableName = t.javaClass.simpleName,
                     message = t.message,
                     hrFrames = hr.size,
-                    rrFrames = rr.size,
+                    rrFrames = 0,
                     consecutiveFailures = runLength,
                 ))
             }
@@ -10908,9 +11014,18 @@ class WhoopBleClient(
                 offloadSkinTemp = offloadSkinTemp.get(), offloadSpo2 = offloadSpo2.get(),
                 offloadSteps = offloadSteps.get(),
             ), com.noop.testcentre.TestDomain.CONNECTION)
+            // Frames this link REJECTED, per reason. A per-connection readout, so it sits behind the
+            // Test Centre's Connection domain (D3) — a resync after a lost notification rejects frames
+            // routinely and always did, and that number is explicitly NOT the signal to act on. The one
+            // that is (payload CRC32 verified, envelope not) announces itself when it happens, whether
+            // or not any test mode is on. Silent when the link rejected nothing.
+            if (testCentre.active(com.noop.testcentre.TestDomain.CONNECTION)) {
+                rejectTally.summaryLine()?.let { log(it, com.noop.testcentre.TestDomain.CONNECTION) }
+            }
         }
         // Clear the tally with the link, so a second teardown for the same drop cannot re-report it.
         inboundFrames = 0; inboundBytes = 0; cmdChannelFrames = 0
+        rejectTally.reset(); loggedRejectReasons.clear()
         liveHr.set(0); liveRr.set(0); offloadHr.set(0); offloadRr.set(0)
         offloadGravity.set(0); offloadResp.set(0); offloadSkinTemp.set(0)
         offloadSpo2.set(0); offloadSteps.set(0); offloadChunks.set(0)
@@ -11468,7 +11583,13 @@ class WhoopBleClient(
         val w = captureWriter ?: return
         runCatching {
             val parsed = Framing.parseFrame(frame, connectedFamily)
-            captureSummary.record(parsed.typeName, parsed.crcOk, frame.size, characteristic, frame.toHex())
+            // PARSEABILITY, not integrity: the type the decoder read is kept whatever the verdict was,
+            // because a capture exists to map frames nothing else can read. The verdict travels beside
+            // it as the reject reason.
+            captureSummary.record(
+                parsed.typeName, parsed.crcOk, frame.size, characteristic, frame.toHex(),
+                parsed.rejectReason,
+            )
             val line = BackfillCaptureJsonl.encode(
                 BackfillCaptureRecord(
                     capturedAtMs = System.currentTimeMillis(),
@@ -11480,6 +11601,7 @@ class WhoopBleClient(
                     size = frame.size,
                     parsed = parsed.parsed,
                     hex = frame.toHex(),
+                    rejectReason = parsed.rejectReason,
                 ),
             )
             var checkBytes = false

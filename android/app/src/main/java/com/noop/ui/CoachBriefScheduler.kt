@@ -50,6 +50,20 @@ object CoachBriefScheduler {
      */
     fun reschedule(context: Context, settings: CoachBriefSettings = CoachBriefSettings.from(context)) {
         val wm = WorkManager.getInstance(context.applicationContext)
+        // The Coach master switch vetoes the brief outright. Checked HERE as well as where the switch is
+        // flipped, because cancelling once is not enough: anything that reschedules later (a settings
+        // change, a boot receiver, a time edit) would re-arm a background provider call for a wearer who
+        // has Coach switched off, and the brief's own flag would still read true.
+        if (!NoopPrefs.coachEnabled(context.applicationContext)) {
+            wm.cancelUniqueWork(WORK_NAME)
+            publishToWidgetSync(context, null)
+            // A brief already posted stays in the shade until it is swiped away, and tapping it opens Coach.
+            // Same leak as the widget, one surface over: AI output still on display, and still interactive,
+            // after the AI was switched off.
+            NotificationManagerCompat.from(context).cancel(NOTIF_ID)
+            NotificationManagerCompat.from(context).cancel(NOTIF_ID_UNAVAILABLE)
+            return
+        }
         if (!settings.enabled) {
             wm.cancelUniqueWork(WORK_NAME)
             publishToWidgetSync(context, null)  // K10: clear the widget when the feature is turned off
@@ -99,6 +113,11 @@ object CoachBriefScheduler {
      * null on failure (no key/consent/network) — the caller surfaces that.
      */
     suspend fun generateNow(context: Context): String? {
+        // Same master-switch gate as the iOS `generateBrief`, because this entry has NO UI: it is what the
+        // worker calls. `reschedule` cancels the work when the switch goes off, but an already-enqueued run
+        // can still be in flight when that happens, and it would otherwise reach a provider with the AI
+        // switched off.
+        if (!NoopPrefs.coachEnabled(context.applicationContext)) return null
         val ctx = context.applicationContext
         val provider = AiKeyStore.readProvider(ctx)
         val model = AiKeyStore.readModel(ctx, provider)

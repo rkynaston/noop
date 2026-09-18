@@ -176,6 +176,10 @@ struct SettingsView: View {
     /// #1841: shared with Android by name and meaning; each platform keeps its own store. Default FALSE
     /// on Apple (Android defaults true) because the system behaviour may not fire on our
     /// `NavigationStack(path:)` tabs — see RootTabView.
+    /// The Coach master switch, under the same `noop.` key Android writes. Default ON, so nothing changes
+    /// for an install that never opens this row. Read by `RootTabView` (the tab), Today (the launcher card)
+    /// and `CoachBriefScheduler` (the daily background brief).
+    @AppStorage("noop.coachEnabled") private var coachEnabled = true
     @AppStorage("noop.bottomBarAutoHide") private var bottomBarAutoHide = false
     @AppStorage(ClockFormatPreference.defaultsKey)
     private var clockFormatRaw = ClockFormatPreference.system.rawValue
@@ -190,6 +194,8 @@ struct SettingsView: View {
     @AppStorage(UnitPrefs.hrvWindowKey) private var hrvWindowRaw = HrvWindow.whole.rawValue
     // Live-HR Live Activity (Lock Screen + Dynamic Island), iOS only (#336). Default on.
     @AppStorage(UnitPrefs.liveActivityKey) private var liveActivityEnabled = true
+    // Strap-sync Live Activity, iOS only. Separate from the live-HR one on purpose. Default on.
+    @AppStorage(UnitPrefs.syncLiveActivityKey) private var syncLiveActivityEnabled = true
     @AppStorage(DayCycleMode.storageKey) private var dayCycleModeRaw = DayCycleMode.sleepOnset.rawValue
     // Alternate app icon (iOS only) — false = Titanium (primary AppIcon), true = Blue Titanium
     // ("AppIcon-Navy"). Display-only preference; the live switch goes through setAlternateIconName.
@@ -236,6 +242,10 @@ struct SettingsView: View {
     /// without the device dimming. The live-workout view reads this same key. The string is shared
     /// verbatim with the Android twin (SharedPreferences "workoutKeepScreenOn").
     @AppStorage("workoutKeepScreenOn") private var workoutKeepScreenOn = false
+
+    /// Opt-in "Keep screen on while syncing" (default OFF, iOS only). `SyncKeepAwake` holds the screen awake
+    /// for as long as a strap history sync runs while this is on.
+    @AppStorage(ScreenIdle.strapSyncKeepAwakeKey) private var syncKeepScreenOn = false
 
     /// The strap model the user last picked (same key the scan pickers write). Gates the WHOOP 4.0-only
     /// rename control in the strap card — renaming uses the Harvard command set, which a 5/MG doesn't share.
@@ -340,6 +350,9 @@ struct SettingsView: View {
                 strapCard.staggeredAppear(index: 3)
                 streakCard.staggeredAppear(index: 4)
                 featuresCard.staggeredAppear(index: 5)
+                #if os(iOS)
+                syncCard.staggeredAppear(index: 6)
+                #endif
 
                 // Lower-frequency sections collapse behind a single default-closed disclosure so the
                 // screen opens at ~6 sections instead of 11. Nothing is removed; every section here
@@ -1201,6 +1214,25 @@ struct SettingsView: View {
                     // picker would appear to do nothing until the app restarted.
                     .onChangeCompat(of: clockFormatRaw) { _ in AppClock.invalidate() }
                 }
+                rowDivider
+                // The Coach master switch. Offered on BOTH platforms, not only where the bottom bar is: it
+                // does not hide chrome, it turns the AI off, and macOS reaches the same Coach from its
+                // sidebar. With this off the tab (or sidebar row) goes, the Today launcher card goes, and
+                // the daily brief is cancelled -- the brief being the surface that would otherwise keep
+                // calling a provider from the background with no UI to reveal it. The saved provider key is
+                // kept, so this is a flip rather than a re-setup.
+                FormRow(label: "AI Coach") {
+                    Toggle("", isOn: $coachEnabled)
+                        .labelsHidden()
+                        .tint(StrandPalette.accent)
+                        .accessibilityLabel("AI Coach")
+                }
+                .onChangeCompat(of: coachEnabled) { on in
+                    // Switching the AI off has to TAKE DOWN what the brief already published, not just stop the
+                    // next one: the widget renders the last brief it was given, so without this a wearer would
+                    // still be looking at AI output on their home screen after turning the AI off.
+                    CoachBriefScheduler.applyMasterSwitch(on)
+                }
                 #if os(iOS)
                 rowDivider
                 // #1841: the same preference Android drives its own bar with, by name and meaning. Here
@@ -1528,6 +1560,21 @@ struct SettingsView: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                rowDivider
+                // MARK: Strap-sync Live Activity — its own switch, independent of the live-HR one.
+                Toggle(isOn: $syncLiveActivityEnabled) {
+                    Text("Strap sync in Dynamic Island")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                .accessibilityHint("Shows sync progress on the Lock Screen and in the Dynamic Island")
+                Text("Shows Connecting… / Syncing… with the chunk count and elapsed time while NOOP pulls history from your strap, including a sync started by the Sync Strap shortcut. Independent of the live heart rate switch above.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 #endif
             }
         }
@@ -1721,7 +1768,7 @@ struct SettingsView: View {
                 .tint(StrandPalette.accent)
                 .accessibilityHint("Offers to save a workout when it spots sustained elevated heart rate")
 
-                Text("After a sync, NOOP looks over your recent heart rate for a sustained, raised stretch that looks like exercise and offers to save it. It only ever suggests. Nothing is saved until you tap Save, and you can dismiss any suggestion. Deliberately conservative, so the odd workout may be missed. On \(Platform.deviceNounPhrase) only.")
+                Text("After a sync, NOOP looks over your recent heart rate for a sustained, raised stretch that looks like exercise and offers to save it. It only ever suggests. Nothing is saved until you tap Save, and you can dismiss any suggestion. Turning this off stops future suggestions but keeps your existing workout history. Deliberately conservative, so the odd workout may be missed. On \(Platform.deviceNounPhrase) only.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1760,6 +1807,36 @@ struct SettingsView: View {
             }
         }
     }
+
+    #if os(iOS)
+    // MARK: - Sync (iOS)
+
+    /// Behaviour while a strap history sync runs. Its own section rather than a row under Features, which holds
+    /// optional trackers. `SyncKeepAwake` reads the same key.
+    private var syncCard: some View {
+        SettingsSection(
+            icon: "arrow.triangle.2.circlepath",
+            title: "Sync",
+            blurb: "How NOOP behaves while it pulls stored history from your strap."
+        ) {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2 + 2) {
+                Toggle(isOn: $syncKeepScreenOn) {
+                    Text("Keep screen on while syncing")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                .accessibilityHint("Stops the screen locking while your strap's history syncs")
+
+                Text("Holds the screen awake while NOOP pulls stored history from your strap, so you can watch a long sync finish without the phone locking. Only applies while a sync is running and NOOP is open. The screen sleeps normally the rest of the time. It uses a bit more battery while the screen stays on.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+    #endif
 
     // MARK: - Backup & restore
 

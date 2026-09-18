@@ -17,19 +17,10 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
-## 11.7.1: Historical R-R as the sole persisted authority (all platforms)
+## 11.8.1: Historical R-R authority
 
-- R-R intervals retrieved from WHOOP strap historical memory are now the only WHOOP R-R source written
-  to the durable R-R dataset. Standard 2A37 and R10/R11 R-R remain decoded and available to live UI and
-  diagnostics, but persist zero R-R rows.
-- Historical offloads retain the existing storage model and full interval sequence, including multiple
-  legitimate intervals sharing an integer-second timestamp. Their diagnostics now identify the authority
-  source and report received, accepted and persisted counts alongside occupied seconds, summed R-R
-  duration, represented span, coverage ratios, delivery histogram and gap histogram.
-- Existing database rows and schema are untouched. HR persistence, R-R filters, HRV, sleep, respiration,
-  strain and recovery calculations are unchanged.
-
----
+- **Historical R-R authority.** Only historical/offload R-R is saved for WHOOP analytics. WHOOP realtime and standard Bluetooth R-R remain available to live displays and diagnostics.
+- **11.8.0 features preserved.** Includes Ryan's 11.8.0 functionality. Existing stored R-R is unchanged; this policy applies to newly received data.
 
 ## 11.1.0: A clock you choose, sleep without motion, and logs that report instead of assuming (all platforms)
 

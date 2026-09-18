@@ -1751,6 +1751,18 @@ fun SettingsScreen(
             title = uiString(R.string.l10n_settings_screen_bottom_bar_f84098a9),
             blurb = uiString(R.string.l10n_settings_screen_how_the_navigation_bar_looks_f186b099),
         ) {
+            // The Coach tab's master switch. It sits in this section because the tab is where a wearer
+            // meets the feature, but it is NOT tab chrome: switching it off disables the AI itself, takes
+            // the Today launcher card with it, and cancels the daily brief (which otherwise keeps calling
+            // a provider from the background and posting notifications, with no UI attached to reveal that
+            // it is still running). The saved provider key is kept, so this is a flip and not a re-setup.
+            SettingsFormRow(label = uiString(R.string.l10n_settings_screen_ai_coach_130c3eab)) {
+                Switch(
+                    checked = BottomBarStyleStore.coachEnabled,
+                    onCheckedChange = { BottomBarStyleStore.setCoachEnabled(context, it) },
+                )
+            }
+            SettingsRowDivider()
             // #1836: which bottom-bar layout to draw. Default OFF — the shipped reserved slot. The
             // overlay lets a screen's own backdrop show through the bar's glass, which is what it was
             // built for, but it is app-shell layout no test can judge, so it ships switchable.
@@ -3185,7 +3197,7 @@ fun SettingsScreen(
                 SettingsRowDivider()
                 SettingsToggleRow(
                     title = uiString(R.string.l10n_settings_screen_auto_detect_workouts_bed4cf2a),
-                    detail = "After a sync, NOOP looks over your recent heart rate for a sustained, raised stretch that looks like exercise and offers to save it. It only ever suggests. Nothing is saved until you tap Save, and you can dismiss any suggestion. Deliberately conservative, so the odd workout may be missed. On this phone only.",
+                    detail = "After a sync, NOOP looks over your recent heart rate for a sustained, raised stretch that looks like exercise and offers to save it. It only ever suggests. Nothing is saved until you tap Save, and you can dismiss any suggestion. Turning this off stops future suggestions; workouts already in your history remain. Deliberately conservative, so the odd workout may be missed. On this phone only.",
                     checked = autoDetectWorkouts,
                     onCheckedChange = {
                         autoDetectWorkouts = it
