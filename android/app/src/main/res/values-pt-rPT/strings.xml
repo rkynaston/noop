@@ -2774,4 +2774,5 @@
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">Um ecrã de stress que acompanha, leituras do WHOOP 5 nas unidades que a pulseira envia, e um anel que deixa de se repetir</string>
     <string name="l10n_settings_screen_ai_coach_130c3eab">Treinador de IA</string>
     <string name="l10n_app_changelog_a_gym_log_book_on_your_e0f00272">Um caderno de ginásio no pulso, um Coach que podes desligar, e um atalho para sincronizar a pulseira</string>
+    <string name="changelog_historical_rr_authority">Dados R-R históricos como fonte de referência</string>
 </resources>

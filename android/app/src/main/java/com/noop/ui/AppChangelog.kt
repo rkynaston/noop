@@ -39,7 +39,7 @@ object AppChangelog {
     val releases: List<Release> = listOf(
         Release(
             version = "11.8.1",
-            title = "Historical R-R authority",
+            title = uiString(R.string.changelog_historical_rr_authority),
             date = "September 2026",
             items = listOf(
                 "**Historical R-R authority.** Only historical/offload R-R is saved for WHOOP analytics. WHOOP realtime and standard Bluetooth R-R remain available to live displays and diagnostics.",

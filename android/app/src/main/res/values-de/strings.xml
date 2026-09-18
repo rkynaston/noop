@@ -2795,4 +2795,5 @@
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">Ein Stress-Bildschirm, der mitkommt, WHOOP-5-Werte in den Einheiten, die das Band sendet, und ein Ring, der sich nicht mehr wiederholt</string>
     <string name="l10n_settings_screen_ai_coach_130c3eab">KI-Coach</string>
     <string name="l10n_app_changelog_a_gym_log_book_on_your_e0f00272">Ein Trainingstagebuch am Handgelenk, ein Coach, den du abschalten kannst, und ein Kurzbefehl zum Synchronisieren</string>
+    <string name="changelog_historical_rr_authority">Historische R-R-Daten als maßgebliche Quelle</string>
 </resources>
